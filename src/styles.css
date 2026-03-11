@@ -188,6 +188,7 @@ table {
   align-self: start;
   justify-self: end;
   height: 36px;
+  border-bottom: 1px solid var(--border-color);
   z-index: 7;
 }
 
@@ -279,7 +280,11 @@ table {
   margin-top: 36px;
   height: calc(100% - 36px);
   cursor: col-resize;
-  background: transparent;
+  background: var(--border-color);
+}
+
+.pane-handle-vertical .divider-vertical {
+  display: none;
 }
 
 .pane-handle-horizontal {
@@ -496,8 +501,7 @@ table {
   display: flex;
   align-items: stretch;
   height: 100%;
-
-  border-left: 1px solid var(--border-color);
+
   background: var(--shell-sidebar-bg);
 }
 
@@ -517,16 +521,22 @@ table {
 }
 
 .window-control-button.utility {
-  border-right: 1px solid var(--border-color);
-  margin-right: 2px;
+  width: 28px;
+  height: 28px;
+  align-self: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  margin-right: 8px;
 }
 
 
 
-.window-control-button:hover {
+
+
+.window-control-button.utility:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
-  border-left-color: var(--border-color);
+  border-left-color: transparent;
 }
 
 
@@ -1016,6 +1026,12 @@ table {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+
+
+
+
+
 
 
 
