@@ -44,8 +44,9 @@ export function AppShell(props: AppShellProps) {
     "--sidebar-size": sidebarCollapsed ? "0px" : `${sidebarWidth}px`,
     "--sidebar-handle-size": "0px",
     "--inspector-size": inspectorOpen ? `${inspectorWidth}px` : "0px",
-    "--inspector-handle-size": inspectorOpen ? "6px" : "0px",
-    "--bottom-size": bottomPanelOpen ? `${bottomPanelHeight}px` : "0px"
+    "--inspector-handle-size": inspectorOpen ? "1px" : "0px",
+    "--bottom-size": bottomPanelOpen ? `${bottomPanelHeight}px` : "0px",
+    "--tabs-right-padding": inspectorOpen ? "8px" : "calc(var(--window-controls-width) + 8px)"
   } as CSSProperties;
 
   return (
@@ -95,3 +96,5 @@ export function AppShell(props: AppShellProps) {
     </div>
   );
 }
+
+
