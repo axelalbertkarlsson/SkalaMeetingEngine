@@ -1,4 +1,4 @@
-﻿import type { ReactNode } from "react";
+import type { ReactNode } from "react";
 import { RibbonButton } from "./RibbonButton";
 
 export interface RibbonSection {
@@ -25,7 +25,7 @@ interface RibbonRailProps {
 export function RibbonRail({ sections, activeSectionId, onSelectSection, utilityActions }: RibbonRailProps) {
   return (
     <nav className="ribbon-rail" aria-label="Primary sections">
-      <div className="ribbon-group">
+      <div className="ribbon-group ribbon-group-primary">
         {sections.map((section) => (
           <RibbonButton
             key={section.id}

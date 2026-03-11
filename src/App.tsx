@@ -88,7 +88,7 @@ function createSectionTab(sectionId: SectionId): WorkspaceTabState {
     title: sectionTitles[sectionId],
     kind: "section",
     sectionId,
-    closable: sectionId !== "home"
+    closable: true
   };
 }
 
@@ -679,6 +679,29 @@ function App() {
     }
   };
 
+  const reorderTabs = (draggedTabId: string, targetTabId: string, placement: "before" | "after") => {
+    if (draggedTabId === targetTabId) {
+      return;
+    }
+
+    setTabs((currentTabs) => {
+      const draggedTab = currentTabs.find((tab) => tab.id === draggedTabId);
+      if (!draggedTab) {
+        return currentTabs;
+      }
+
+      const withoutDragged = currentTabs.filter((tab) => tab.id !== draggedTabId);
+      const targetIndex = withoutDragged.findIndex((tab) => tab.id === targetTabId);
+      if (targetIndex === -1) {
+        return currentTabs;
+      }
+
+      const insertIndex = placement === "after" ? targetIndex + 1 : targetIndex;
+      withoutDragged.splice(insertIndex, 0, draggedTab);
+      return withoutDragged;
+    });
+  };
+
   const beginInspectorResize = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!inspectorOpen) {
       return;
@@ -821,6 +844,7 @@ function App() {
           onSelectTab={selectTab}
           onCloseTab={closeTab}
           onCreateTab={createScratchTab}
+          onReorderTabs={reorderTabs}
           topRightControls={<WindowTitleBar />}
         >
           {renderWorkspaceContent()}

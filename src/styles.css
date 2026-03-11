@@ -33,21 +33,20 @@
   --font-size-lg: 15px;
   --font-size-xl: 17px;
 }
-
 :root[data-theme="light"] {
   color-scheme: light;
   --app-bg: #eceff3;
-  --panel-bg-primary: #f5f7fa;
+  --panel-bg-primary: #f6f6f6;
   --panel-bg-secondary: #ffffff;
-  --panel-bg-tertiary: #eef1f5;
+  --panel-bg-tertiary: #f6f6f6;
   --shell-workspace-bg: #ffffff;
-  --shell-sidebar-bg: #f5f7fa;
+  --shell-sidebar-bg: #f6f6f6;
   --border-color: #c9d0db;
   --text-primary: #1f2937;
   --text-muted: #5f6c7d;
   --accent-color: #255cc9;
-  --hover-bg: #e9eef5;
-  --selected-bg: #dde6f4;
+  --hover-bg: #e6e6e6;
+  --selected-bg: #e6e6e6;
   --danger-color: #b42318;
   --warning-color: #b7791f;
   --success-color: #166534;
@@ -236,6 +235,10 @@ table {
   gap: var(--space-1);
 }
 
+.ribbon-group-primary {
+  padding-top: calc(36px + var(--space-1));
+}
+
 .ribbon-group-bottom {
   padding-bottom: var(--space-1);
 }
@@ -407,22 +410,28 @@ table {
 }
 
 
+.workspace-tabs-main {
+  display: flex;
+  align-items: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .workspace-tabs-list {
   display: flex;
   align-items: flex-end;
   gap: 2px;
   min-width: 0;
+  flex: 0 1 auto;
+  max-width: calc(100% - 34px);
+  overflow: hidden;
 }
 
-.workspace-tabs-drag-region {
-  flex: 1;
-  min-width: 20px;
-  align-self: stretch;
-}
 
 .workspace-tabs-trailing {
   display: flex;
   align-self: stretch;
+  margin-left: auto;
   z-index: 4;
 }
 
@@ -467,8 +476,10 @@ table {
 .workspace-tab {
   display: inline-flex;
   align-items: center;
-  min-width: 112px;
-  max-width: 260px;
+  width: 168px;
+  flex: 0 1 168px;
+  min-width: 21px;
+  max-width: 320px;
   border: 1px solid transparent;
   border-bottom: 0;
   border-top-left-radius: 9px;
@@ -476,10 +487,51 @@ table {
   background: transparent;
   position: relative;
   z-index: 1;
+  user-select: none;
+  cursor: grab;
+}
+
+.workspace-tab.dragging {
+  opacity: 0.62;
+  cursor: grabbing;
+}
+
+.workspace-tab.drop-before {
+  box-shadow: inset 2px 0 0 var(--accent-color);
+}
+
+.workspace-tab.drop-after {
+  box-shadow: inset -2px 0 0 var(--accent-color);
+}
+
+.workspace-tab-hover-surface {
+  position: absolute;
+  inset: 2px 3px 2px;
+  border-radius: 7px;
+  background: var(--hover-bg);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.workspace-tab-inner {
+  display: inline-flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 30px;
+  border-top-left-radius: 9px;
+  border-top-right-radius: 9px;
+  position: relative;
+  z-index: 1;
 }
 
 .workspace-tab:hover {
-  background: var(--hover-bg);
+  background: transparent;
+}
+
+.workspace-tab:not(.active):hover .workspace-tab-hover-surface {
+  opacity: 1;
 }
 
 .workspace-tab.active {
@@ -533,7 +585,8 @@ table {
   background: transparent;
   text-align: left;
   padding: 0 10px;
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-md);
+  font-weight: 500;
   color: inherit;
   white-space: nowrap;
   overflow: hidden;
@@ -561,7 +614,9 @@ table {
   width: 30px;
   height: 30px;
   align-self: center;
-  border: 1px solid transparent;
+  flex: 0 0 auto;
+  margin-left: 2px;
+  border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
@@ -569,7 +624,6 @@ table {
 }
 
 .workspace-tab-new:hover {
-  border-color: var(--border-color);
   background: var(--hover-bg);
   color: var(--text-primary);
 }
@@ -882,3 +936,7 @@ table {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+
+
+
