@@ -55,6 +55,18 @@ export function VaultIcon() {
   );
 }
 
+
+export function DocumentIcon() {
+  return (
+    <BaseIcon>
+      <path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" />
+      <path d="M15 3v6h6" />
+      <path d="M8.5 13h7" />
+      <path d="M8.5 17h7" />
+    </BaseIcon>
+  );
+}
+
 export function CodeIcon() {
   return (
     <BaseIcon>
@@ -167,3 +179,4 @@ export function WindowCloseIcon() {
     </BaseIcon>
   );
 }
+

@@ -728,6 +728,124 @@ table {
   flex-direction: column;
   gap: var(--space-3);
 }
+.documents-screen {
+  height: 100%;
+}
+
+.documents-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 1px;
+  background: var(--panel-bg-tertiary);
+}
+
+.documents-mode-button {
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0 8px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.documents-mode-button:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.documents-mode-button.active {
+  background: var(--selected-bg);
+  color: var(--text-primary);
+}
+
+.documents-pane {
+  flex: 1;
+  min-height: 420px;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  min-width: 0;
+}
+
+.documents-pane .w-md-editor {
+  --color-canvas-default: var(--panel-bg-secondary);
+  --color-fg-default: var(--text-primary);
+  --color-fg-muted: var(--text-muted);
+  --color-border-default: var(--border-color);
+  --color-border-muted: var(--border-color);
+  --color-accent-fg: var(--accent-color);
+  --color-neutral-muted: var(--hover-bg);
+  --color-canvas-subtle: var(--panel-bg-tertiary);
+  border: 0;
+  box-shadow: none;
+  background: var(--panel-bg-secondary);
+  color: var(--text-primary);
+  flex: 1;
+  height: 100% !important;
+  min-height: 100% !important;
+}
+
+.documents-pane .w-md-editor-toolbar {
+  min-height: 36px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--panel-bg-tertiary);
+}
+
+.documents-pane .w-md-editor-toolbar li > button {
+  border-radius: var(--radius-xs);
+}
+
+.documents-pane .w-md-editor-toolbar li > button:hover,
+.documents-pane .w-md-editor-toolbar li > button:focus {
+  background: var(--hover-bg);
+}
+
+.documents-pane .w-md-editor-content,
+.documents-pane .w-md-editor-text,
+.documents-pane .w-md-editor-text-input,
+.documents-pane .w-md-editor-preview {
+  background: var(--panel-bg-secondary);
+  color: var(--text-primary);
+}
+
+.documents-pane .w-md-editor-text-input,
+.documents-pane .w-md-editor-text-pre,
+.documents-pane .w-md-editor-preview {
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+}
+
+.documents-pane .w-md-editor-preview {
+  padding: var(--space-3);
+}
+
+:root[data-theme="light"] .documents-pane .w-md-editor-text-input,
+:root[data-theme="light"] .documents-pane .w-md-editor-text-pre {
+  color: #111111;
+  -webkit-text-fill-color: #111111;
+  caret-color: #111111;
+}
+
+.documents-pane .wmde-markdown {
+  background: var(--panel-bg-secondary);
+  color: var(--text-primary);
+}
+
+.documents-pane .wmde-markdown table th,
+.documents-pane .wmde-markdown table td {
+  border-color: var(--border-color);
+}
+
+.documents-pane .wmde-markdown code,
+.documents-pane .wmde-markdown pre {
+  background: var(--panel-bg-tertiary);
+}
 
 .pane-header {
   display: flex;
@@ -1051,4 +1169,33 @@ table {
 
 
 
+
+
+
+
+
+
+/* Documents editor fill-height override */
+.documents-screen {
+  min-height: 100%;
+}
+
+.documents-pane {
+  min-width: 0;
+}
+
+.documents-pane .w-md-editor {
+  height: 100% !important;
+  min-height: 100% !important;
+}
+
+.documents-pane .w-md-editor-content {
+  height: calc(100% - 36px);
+}
+
+.documents-pane .w-md-editor-area,
+.documents-pane .w-md-editor-text,
+.documents-pane .w-md-editor-preview {
+  height: 100%;
+}
 

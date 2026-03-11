@@ -1,4 +1,4 @@
-﻿# Skala Meeting Engine
+# Skala Meeting Engine
 
 Skala Meeting Engine is a Tauri + React desktop workbench for meeting capture, transcription workflows, review, and safe publishing into Obsidian.
 
@@ -23,8 +23,9 @@ The app shell has been refactored from a dashboard layout into a pane-based desk
 
 - Home
 - Meetings
-- Runs
 - Vault
+- Documents
+- Runs
 - Codex
 - Settings
 
@@ -43,3 +44,10 @@ All screens now render inside the same pane-based shell architecture with compac
 - This step is UI architecture only.
 - Recording, transcription, Codex subprocess runtime, and publish execution remain scaffold-level and are not expanded here.
 
+## Documents section
+
+- The permanent icon rail includes `Documents` between `Vault` and `Runs`.
+- Documents opens a dedicated markdown workspace page in the main pane.
+- The editor is dependency-backed (`@uiw/react-md-editor`) for production-ready editing UX with built-in toolbar and rendered preview.
+- Markdown support includes headings, emphasis, links, lists, checklists, blockquotes, code blocks, and tables (via GFM preview plugin).
+- Editor content and view mode are persisted in local storage for continuity across sessions.

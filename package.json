@@ -11,8 +11,10 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "@uiw/react-md-editor": "^4.0.11",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
