@@ -55,6 +55,8 @@ export function AppShell(props: AppShellProps) {
 
       {topRightControls ? <div className="app-shell-top-right-controls">{topRightControls}</div> : null}
 
+      {inspectorOpen ? <div className="app-shell-inspector-header-overlay" aria-hidden="true" /> : null}
+
       <div className="app-shell-rail">{rail}</div>
 
       <aside className="app-shell-sidebar" aria-hidden={sidebarCollapsed}>
@@ -96,5 +98,6 @@ export function AppShell(props: AppShellProps) {
     </div>
   );
 }
+
 
 
