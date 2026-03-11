@@ -1,9 +1,11 @@
-﻿:root {
+:root {
   color-scheme: dark;
   --app-bg: #1b1e24;
   --panel-bg-primary: #20252d;
   --panel-bg-secondary: #252b34;
   --panel-bg-tertiary: #171b22;
+  --shell-workspace-bg: var(--panel-bg-primary);
+  --shell-sidebar-bg: var(--panel-bg-secondary);
   --border-color: #353d49;
   --text-primary: #dbe2ef;
   --text-muted: #98a4b8;
@@ -38,6 +40,8 @@
   --panel-bg-primary: #f5f7fa;
   --panel-bg-secondary: #ffffff;
   --panel-bg-tertiary: #eef1f5;
+  --shell-workspace-bg: #ffffff;
+  --shell-sidebar-bg: #f5f7fa;
   --border-color: #c9d0db;
   --text-primary: #1f2937;
   --text-muted: #5f6c7d;
@@ -120,11 +124,12 @@ table {
   grid-template-rows: minmax(0, 1fr) var(--bottom-size, 0px) 28px;
 }
 
+
 .app-shell-rail {
   grid-column: 1;
   grid-row: 1 / 4;
   border-right: 1px solid var(--border-color);
-  background: var(--panel-bg-tertiary);
+  background: var(--shell-sidebar-bg);
   min-width: 0;
 }
 
@@ -132,7 +137,7 @@ table {
   grid-column: 2;
   grid-row: 1 / 4;
   border-right: 1px solid var(--border-color);
-  background: var(--panel-bg-secondary);
+  background: var(--shell-sidebar-bg);
   min-width: 0;
   overflow: hidden;
 }
@@ -142,7 +147,7 @@ table {
   grid-row: 1;
   min-width: 0;
   min-height: 0;
-  background: var(--panel-bg-primary);
+  background: var(--shell-workspace-bg);
 }
 
 .app-shell-inspector {
@@ -384,9 +389,9 @@ table {
   align-items: flex-end;
   height: 36px;
   min-height: 36px;
-  padding: 4px 6px 0;
-  gap: 2px;
-  background: var(--panel-bg-tertiary);
+  padding: 4px 0 0 6px;
+  gap: 0;
+  background: var(--shell-sidebar-bg);
   position: relative;
 }
 
@@ -401,6 +406,64 @@ table {
   pointer-events: none;
 }
 
+
+.workspace-tabs-list {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-tabs-drag-region {
+  flex: 1;
+  min-width: 20px;
+  align-self: stretch;
+}
+
+.workspace-tabs-trailing {
+  display: flex;
+  align-self: stretch;
+  z-index: 4;
+}
+
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  border-left: 1px solid var(--border-color);
+  background: var(--shell-sidebar-bg);
+}
+
+.window-control-button {
+  width: 44px;
+  height: 100%;
+  border: 0;
+  border-left: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.window-control-button:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+  border-left-color: var(--border-color);
+}
+
+.window-control-button.close:hover {
+  background: #c42b1c;
+  color: #ffffff;
+  border-left-color: #c42b1c;
+}
+
+.window-control-button svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2;
+}
 .workspace-tab {
   display: inline-flex;
   align-items: center;
@@ -434,15 +497,15 @@ table {
   content: "";
   position: absolute;
   bottom: -0px;
-  width: 9px;
-  height: 9px;
+  width: 5px;
+  height: 8px;
   pointer-events: none;
-  background-color: var(--panel-bg-tertiary);
+  background-color: var(--shell-sidebar-bg);
   background-repeat: no-repeat;
 }
 
 .workspace-tab.active::before {
-  left: -7.8px;
+  left: -5px;
   background-image: radial-gradient(
     circle at 0 0,
     transparent 6px,
@@ -452,7 +515,7 @@ table {
 }
 
 .workspace-tab.active::after {
-  right: -7.8px;
+  right: -5px;
   background-image: radial-gradient(
     circle at 100% 0,
     transparent 6px,
@@ -819,18 +882,3 @@ table {
     grid-template-columns: minmax(0, 1fr);
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

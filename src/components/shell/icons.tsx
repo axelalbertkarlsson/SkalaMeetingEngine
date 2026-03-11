@@ -1,4 +1,4 @@
-﻿import type { SVGProps } from "react";
+import type { SVGProps } from "react";
 
 function BaseIcon(props: SVGProps<SVGSVGElement>) {
   return (
@@ -134,3 +134,36 @@ export function FolderIcon() {
   );
 }
 
+export function WindowMinimizeIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 12h14" />
+    </BaseIcon>
+  );
+}
+
+export function WindowMaximizeIcon() {
+  return (
+    <BaseIcon>
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+    </BaseIcon>
+  );
+}
+
+export function WindowRestoreIcon() {
+  return (
+    <BaseIcon>
+      <path d="M8 8h10v10H8z" />
+      <path d="M6 16V6h10" />
+    </BaseIcon>
+  );
+}
+
+export function WindowCloseIcon() {
+  return (
+    <BaseIcon>
+      <path d="m7 7 10 10" />
+      <path d="m17 7-10 10" />
+    </BaseIcon>
+  );
+}

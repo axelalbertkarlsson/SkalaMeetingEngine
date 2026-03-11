@@ -8,6 +8,7 @@ import {
 import { InspectorPane, type InspectorSection } from "./components/shell/InspectorPane";
 import { RibbonRail, type RibbonSection, type RibbonUtilityAction } from "./components/shell/RibbonRail";
 import { WorkspacePane } from "./components/shell/WorkspacePane";
+import { WindowTitleBar } from "./components/shell/WindowTitleBar";
 import {
   CodeIcon,
   FolderIcon,
@@ -820,6 +821,7 @@ function App() {
           onSelectTab={selectTab}
           onCloseTab={closeTab}
           onCreateTab={createScratchTab}
+          topRightControls={<WindowTitleBar />}
         >
           {renderWorkspaceContent()}
         </WorkspacePane>
@@ -844,5 +846,3 @@ function App() {
 }
 
 export default App;
-
-
