@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   color-scheme: dark;
   --app-bg: #1b1e24;
   --panel-bg-primary: #20252d;
@@ -142,7 +142,7 @@ table {
   grid-row: 1;
   min-width: 0;
   min-height: 0;
-  background: var(--panel-bg-primary);
+  background: var(--panel-bg-secondary);
 }
 
 .app-shell-inspector {
@@ -275,7 +275,7 @@ table {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 34px;
+  height: 36px;
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border-color);
 }
@@ -382,11 +382,23 @@ table {
 .workspace-tabs {
   display: flex;
   align-items: flex-end;
+  height: 36px;
   min-height: 36px;
   padding: 4px 6px 0;
   gap: 2px;
-  border-bottom: 1px solid var(--border-color);
   background: var(--panel-bg-tertiary);
+  position: relative;
+}
+
+.workspace-tabs::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--border-color);
+  pointer-events: none;
 }
 
 .workspace-tab {
@@ -399,6 +411,8 @@ table {
   border-top-left-radius: 9px;
   border-top-right-radius: 9px;
   background: transparent;
+  position: relative;
+  z-index: 1;
 }
 
 .workspace-tab:hover {
@@ -408,7 +422,36 @@ table {
 .workspace-tab.active {
   background: var(--panel-bg-secondary);
   border-color: var(--border-color);
-  margin-bottom: -1px;
+  border-bottom-color: transparent;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  margin-bottom: -0px;
+  z-index: 3;
+}
+
+.workspace-tab.active::before,
+.workspace-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  background: var(--panel-bg-tertiary);
+  pointer-events: none;
+}
+
+.workspace-tab.active::before {
+  left: -9px;
+  border-right: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  border-bottom-right-radius: 8px;
+}
+
+.workspace-tab.active::after {
+  right: -8.5px;
+  border-left: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  border-bottom-left-radius: 8px;
 }
 
 .workspace-tab-button {
@@ -769,5 +812,12 @@ table {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+
+
+
+
+
+
 
 
