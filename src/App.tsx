@@ -18,7 +18,6 @@ import {
   MoonIcon,
   PanelBottomIcon,
   PanelLeftIcon,
-  PanelRightIcon,
   RunIcon,
   SunIcon,
   VaultIcon
@@ -589,13 +588,6 @@ function App() {
       onClick: () => setSidebarCollapsed((current) => !current)
     },
     {
-      id: "inspector-toggle",
-      label: inspectorOpen ? "Close inspector (Ctrl/Cmd+I)" : "Open inspector (Ctrl/Cmd+I)",
-      icon: <PanelRightIcon />,
-      active: inspectorOpen,
-      onClick: () => setInspectorOpen((current) => !current)
-    },
-    {
       id: "bottom-toggle",
       label: bottomPanelOpen ? "Close bottom panel (Ctrl/Cmd+J)" : "Open bottom panel (Ctrl/Cmd+J)",
       icon: <PanelBottomIcon />,
@@ -819,12 +811,29 @@ function App() {
           sections={railSections}
           activeSectionId={activeSection}
           onSelectSection={(sectionId) => openSection(sectionId as SectionId)}
-          utilityActions={utilityActions}
+          utilityActions={utilityActions.filter((a) => a.id !== "sidebar-toggle")}
         />
+      }
+      leftHeader={
+        <header className="left-pane-header">
+          <div className="left-pane-header-rail">
+            <button
+              type="button"
+              className="left-pane-toggle"
+              onClick={() => setSidebarCollapsed((current) => !current)}
+              title={sidebarCollapsed ? "Show sidebar (Ctrl/Cmd+B)" : "Hide sidebar (Ctrl/Cmd+B)"}
+              aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            >
+              <PanelLeftIcon />
+            </button>
+          </div>
+          <div className="left-pane-header-sidebar" aria-hidden={sidebarCollapsed}>
+            <p className="sidebar-title">{sectionTitles[activeSection]}</p>
+          </div>
+        </header>
       }
       sidebar={
         <CollapsibleSidebar
-          title={sectionTitles[activeSection]}
           collapsed={sidebarCollapsed}
           groups={activeSidebarGroups}
           selectedItemId={selectedSidebarItemId}
@@ -834,9 +843,9 @@ function App() {
               [activeSection]: itemId
             }))
           }
-          onToggleCollapse={() => setSidebarCollapsed((current) => !current)}
         />
       }
+      topRightControls={<WindowTitleBar inspectorOpen={inspectorOpen} onToggleInspector={() => setInspectorOpen((current) => !current)} />}
       workspace={
         <WorkspacePane
           tabs={tabs}
@@ -845,7 +854,6 @@ function App() {
           onCloseTab={closeTab}
           onCreateTab={createScratchTab}
           onReorderTabs={reorderTabs}
-          topRightControls={<WindowTitleBar />}
         >
           {renderWorkspaceContent()}
         </WorkspacePane>
@@ -870,3 +878,7 @@ function App() {
 }
 
 export default App;
+
+
+
+

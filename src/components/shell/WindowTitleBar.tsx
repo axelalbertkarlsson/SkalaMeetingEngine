@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  PanelRightIcon,
   WindowCloseIcon,
   WindowMaximizeIcon,
   WindowMinimizeIcon,
   WindowRestoreIcon
 } from "./icons";
 
-export function WindowTitleBar() {
+interface WindowTitleBarProps {
+  inspectorOpen: boolean;
+  onToggleInspector: () => void;
+}
+
+export function WindowTitleBar({ inspectorOpen, onToggleInspector }: WindowTitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -67,6 +73,16 @@ export function WindowTitleBar() {
 
   return (
     <div className="window-controls" role="toolbar" aria-label="Window controls">
+      <button
+        type="button"
+        className={`window-control-button utility${inspectorOpen ? " active" : ""}`}
+        aria-label={inspectorOpen ? "Close inspector" : "Open inspector"}
+        title={inspectorOpen ? "Close inspector (Ctrl/Cmd+I)" : "Open inspector (Ctrl/Cmd+I)"}
+        onClick={onToggleInspector}
+      >
+        <PanelRightIcon />
+      </button>
+
       <button
         type="button"
         className="window-control-button"

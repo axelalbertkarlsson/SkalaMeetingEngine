@@ -12,7 +12,9 @@ interface AppShellProps {
   onBottomPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   rail: ReactNode;
   sidebar: ReactNode;
+  leftHeader: ReactNode;
   workspace: ReactNode;
+  topRightControls?: ReactNode;
   inspector: ReactNode;
   bottomPanel: ReactNode;
   children?: ReactNode;
@@ -30,7 +32,9 @@ export function AppShell(props: AppShellProps) {
     onBottomPanelResizeStart,
     rail,
     sidebar,
+    leftHeader,
     workspace,
+    topRightControls,
     inspector,
     bottomPanel,
     children
@@ -46,6 +50,10 @@ export function AppShell(props: AppShellProps) {
 
   return (
     <div className="app-shell" style={style}>
+      <div className="app-shell-left-header">{leftHeader}</div>
+
+      {topRightControls ? <div className="app-shell-top-right-controls">{topRightControls}</div> : null}
+
       <div className="app-shell-rail">{rail}</div>
 
       <aside className="app-shell-sidebar" aria-hidden={sidebarCollapsed}>
