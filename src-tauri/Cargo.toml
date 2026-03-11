@@ -1,0 +1,18 @@
+[package]
+name = "skala_meeting_engine"
+version = "0.1.0"
+description = "Workflow-first desktop workbench for meetings and Codex"
+authors = ["Axel Karlsson"]
+edition = "2021"
+
+[lib]
+name = "skala_meeting_engine_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+uuid = { version = "1", features = ["v4", "serde"] }
