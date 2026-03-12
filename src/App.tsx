@@ -5,6 +5,7 @@ import {
   CollapsibleSidebar,
   type SidebarGroupData
 } from "./components/shell/CollapsibleSidebar";
+import { DocumentsSidebar, type DocumentTreeItem } from "./components/shell/DocumentsSidebar";
 import { InspectorPane, type InspectorSection } from "./components/shell/InspectorPane";
 import { RibbonRail, type RibbonSection, type RibbonUtilityAction } from "./components/shell/RibbonRail";
 import { WorkspacePane } from "./components/shell/WorkspacePane";
@@ -72,6 +73,34 @@ const railSections: RibbonSection[] = [
   { id: "settings", label: "Settings", icon: <GearIcon /> }
 ];
 
+const documentsSidebarFolders: DocumentTreeItem[] = [
+  { id: "documents-folder-bita", label: "Bita" },
+  { id: "documents-folder-dyve-internal", label: "Dyve Internal" },
+  { id: "documents-folder-gt", label: "GT" },
+  { id: "documents-folder-personligt", label: "Personligt" },
+  {
+    id: "documents-folder-pps",
+    label: "PPS",
+    children: [{ id: "documents-folder-konsultmatchare", label: "Konsultmatchare" }]
+  }
+];
+
+function findDocumentFolderLabel(items: DocumentTreeItem[], itemId: string): string | undefined {
+  for (const item of items) {
+    if (item.id === itemId) {
+      return item.label;
+    }
+
+    if (item.children?.length) {
+      const match = findDocumentFolderLabel(item.children, itemId);
+      if (match) {
+        return match;
+      }
+    }
+  }
+
+  return undefined;
+}
 const statusLabels: Record<RunStatus, string> = {
   queued: "Queued",
   running: "Running",
@@ -156,7 +185,7 @@ function App() {
       home: "home-recent-run",
       meetings: "meetings-new-recording",
       vault: "vault-info",
-      documents: "documents-editor",
+      documents: "documents-folder-bita",
       runs: "runs-running",
       codex: "codex-workspace",
       settings: "settings-general"
@@ -450,8 +479,23 @@ function App() {
   }, [setBottomPanelOpen, setInspectorOpen, setSidebarCollapsed]);
 
   const activeSidebarGroups = sidebarGroupsBySection[activeSection];
-  const selectedSidebarItemId =
-    selectedSidebarItems[activeSection] ?? activeSidebarGroups[0]?.items[0]?.id ?? "";
+  const selectedSidebarItemId = (() => {
+    const storedSelection = selectedSidebarItems[activeSection];
+    if (activeSection === "documents") {
+      if (storedSelection && storedSelection.startsWith("documents-folder-")) {
+        return storedSelection;
+      }
+
+      return documentsSidebarFolders[0]?.id ?? "";
+    }
+
+    return storedSelection ?? activeSidebarGroups[0]?.items[0]?.id ?? "";
+  })();
+
+  const selectedDocumentFolderLabel = findDocumentFolderLabel(
+    documentsSidebarFolders,
+    selectedSidebarItemId
+  );
 
   const activeTab =
     tabs.find((tab) => tab.id === activeTabId) ??
@@ -521,7 +565,7 @@ function App() {
           title: "Document context",
           rows: [
             { label: "Mode", value: "Markdown editor" },
-            { label: "Selection", value: selectedSidebarItemId || "documents-editor" },
+            { label: "Selection", value: selectedDocumentFolderLabel ?? "None" },
             { label: "Rendering", value: "Live preview with GFM" }
           ]
         },
@@ -605,7 +649,7 @@ function App() {
         ]
       }
     ];
-  }, [contentSection, runStats, selectedSidebarItemId, sortedRuns, theme, workspace]);
+  }, [contentSection, runStats, selectedDocumentFolderLabel, selectedSidebarItemId, sortedRuns, theme, workspace]);
 
   const bottomPanelViews = useMemo<BottomPanelView[]>(() => {
     return [
@@ -904,17 +948,31 @@ function App() {
         </header>
       }
       sidebar={
-        <CollapsibleSidebar
-          collapsed={sidebarCollapsed}
-          groups={activeSidebarGroups}
-          selectedItemId={selectedSidebarItemId}
-          onSelectItem={(itemId) =>
-            setSelectedSidebarItems((current) => ({
-              ...current,
-              [activeSection]: itemId
-            }))
-          }
-        />
+        activeSection === "documents" ? (
+          <DocumentsSidebar
+            collapsed={sidebarCollapsed}
+            folders={documentsSidebarFolders}
+            selectedItemId={selectedSidebarItemId}
+            onSelectItem={(itemId) =>
+              setSelectedSidebarItems((current) => ({
+                ...current,
+                [activeSection]: itemId
+              }))
+            }
+          />
+        ) : (
+          <CollapsibleSidebar
+            collapsed={sidebarCollapsed}
+            groups={activeSidebarGroups}
+            selectedItemId={selectedSidebarItemId}
+            onSelectItem={(itemId) =>
+              setSelectedSidebarItems((current) => ({
+                ...current,
+                [activeSection]: itemId
+              }))
+            }
+          />
+        )
       }
       topRightControls={<WindowTitleBar inspectorOpen={inspectorOpen} onToggleInspector={() => setInspectorOpen((current) => !current)} />}
       workspace={
@@ -949,4 +1007,12 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
+
 

@@ -86,6 +86,76 @@ export function GearIcon() {
   );
 }
 
+
+export function NewNoteIcon() {
+  return (
+    <BaseIcon>
+      <path d="M4 20h4l10.4-10.4a1.8 1.8 0 0 0 0-2.6l-1.4-1.4a1.8 1.8 0 0 0-2.6 0L4 16v4Z" />
+      <path d="m12.8 7.2 4 4" />
+    </BaseIcon>
+  );
+}
+
+export function NewFolderIcon() {
+  return (
+    <BaseIcon>
+      <path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+      <path d="M3 9h18" />
+      <path d="M12 12v6" />
+      <path d="M9 15h6" />
+    </BaseIcon>
+  );
+}
+
+export function SortIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 7h8" />
+      <path d="M5 12h11" />
+      <path d="M5 17h14" />
+      <path d="m18 5 2 2-2 2" />
+      <path d="M20 7h-3" />
+    </BaseIcon>
+  );
+}
+
+export function ExpandAllIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 6h14" />
+      <path d="M5 12h14" />
+      <path d="M5 18h14" />
+      <path d="m9 10 3 3 3-3" />
+    </BaseIcon>
+  );
+}
+
+export function CollapseAllIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 6h14" />
+      <path d="M5 12h14" />
+      <path d="M5 18h14" />
+      <path d="m9 14 3-3 3 3" />
+    </BaseIcon>
+  );
+}
+
+export function ChevronRightIcon() {
+  return (
+    <BaseIcon>
+      <path d="m9 6 6 6-6 6" />
+    </BaseIcon>
+  );
+}
+
+export function ChevronDownIcon() {
+  return (
+    <BaseIcon>
+      <path d="m6 9 6 6 6-6" />
+    </BaseIcon>
+  );
+}
 export function PanelLeftIcon() {
   return (
     <BaseIcon>
@@ -179,4 +249,5 @@ export function WindowCloseIcon() {
     </BaseIcon>
   );
 }
+
 
