@@ -1,4 +1,4 @@
-﻿import type { SVGProps } from "react";
+import type { SVGProps } from "react";
 
 function BaseIcon(props: SVGProps<SVGSVGElement>) {
   return (
@@ -55,6 +55,18 @@ export function VaultIcon() {
   );
 }
 
+
+export function DocumentIcon() {
+  return (
+    <BaseIcon>
+      <path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" />
+      <path d="M15 3v6h6" />
+      <path d="M8.5 13h7" />
+      <path d="M8.5 17h7" />
+    </BaseIcon>
+  );
+}
+
 export function CodeIcon() {
   return (
     <BaseIcon>
@@ -74,6 +86,76 @@ export function GearIcon() {
   );
 }
 
+
+export function NewNoteIcon() {
+  return (
+    <BaseIcon>
+      <path d="M4 20h4l10.4-10.4a1.8 1.8 0 0 0 0-2.6l-1.4-1.4a1.8 1.8 0 0 0-2.6 0L4 16v4Z" />
+      <path d="m12.8 7.2 4 4" />
+    </BaseIcon>
+  );
+}
+
+export function NewFolderIcon() {
+  return (
+    <BaseIcon>
+      <path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+      <path d="M3 9h18" />
+      <path d="M12 12v6" />
+      <path d="M9 15h6" />
+    </BaseIcon>
+  );
+}
+
+export function SortIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 7h8" />
+      <path d="M5 12h11" />
+      <path d="M5 17h14" />
+      <path d="m18 5 2 2-2 2" />
+      <path d="M20 7h-3" />
+    </BaseIcon>
+  );
+}
+
+export function ExpandAllIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 6h14" />
+      <path d="M5 12h14" />
+      <path d="M5 18h14" />
+      <path d="m9 10 3 3 3-3" />
+    </BaseIcon>
+  );
+}
+
+export function CollapseAllIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 6h14" />
+      <path d="M5 12h14" />
+      <path d="M5 18h14" />
+      <path d="m9 14 3-3 3 3" />
+    </BaseIcon>
+  );
+}
+
+export function ChevronRightIcon() {
+  return (
+    <BaseIcon>
+      <path d="m9 6 6 6-6 6" />
+    </BaseIcon>
+  );
+}
+
+export function ChevronDownIcon() {
+  return (
+    <BaseIcon>
+      <path d="m6 9 6 6 6-6" />
+    </BaseIcon>
+  );
+}
 export function PanelLeftIcon() {
   return (
     <BaseIcon>
@@ -133,4 +215,39 @@ export function FolderIcon() {
     </BaseIcon>
   );
 }
+
+export function WindowMinimizeIcon() {
+  return (
+    <BaseIcon>
+      <path d="M5 12h14" />
+    </BaseIcon>
+  );
+}
+
+export function WindowMaximizeIcon() {
+  return (
+    <BaseIcon>
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+    </BaseIcon>
+  );
+}
+
+export function WindowRestoreIcon() {
+  return (
+    <BaseIcon>
+      <path d="M8 8h10v10H8z" />
+      <path d="M6 16V6h10" />
+    </BaseIcon>
+  );
+}
+
+export function WindowCloseIcon() {
+  return (
+    <BaseIcon>
+      <path d="m7 7 10 10" />
+      <path d="m17 7-10 10" />
+    </BaseIcon>
+  );
+}
+
 

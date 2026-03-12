@@ -12,7 +12,9 @@ interface AppShellProps {
   onBottomPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   rail: ReactNode;
   sidebar: ReactNode;
+  leftHeader: ReactNode;
   workspace: ReactNode;
+  topRightControls?: ReactNode;
   inspector: ReactNode;
   bottomPanel: ReactNode;
   children?: ReactNode;
@@ -30,7 +32,9 @@ export function AppShell(props: AppShellProps) {
     onBottomPanelResizeStart,
     rail,
     sidebar,
+    leftHeader,
     workspace,
+    topRightControls,
     inspector,
     bottomPanel,
     children
@@ -40,12 +44,19 @@ export function AppShell(props: AppShellProps) {
     "--sidebar-size": sidebarCollapsed ? "0px" : `${sidebarWidth}px`,
     "--sidebar-handle-size": "0px",
     "--inspector-size": inspectorOpen ? `${inspectorWidth}px` : "0px",
-    "--inspector-handle-size": inspectorOpen ? "6px" : "0px",
-    "--bottom-size": bottomPanelOpen ? `${bottomPanelHeight}px` : "0px"
+    "--inspector-handle-size": inspectorOpen ? "1px" : "0px",
+    "--bottom-size": bottomPanelOpen ? `${bottomPanelHeight}px` : "0px",
+    "--tabs-right-padding": inspectorOpen ? "8px" : "calc(var(--window-controls-width) + 8px)"
   } as CSSProperties;
 
   return (
     <div className="app-shell" style={style}>
+      <div className="app-shell-left-header">{leftHeader}</div>
+
+      {topRightControls ? <div className="app-shell-top-right-controls">{topRightControls}</div> : null}
+
+      {inspectorOpen ? <div className="app-shell-inspector-header-overlay" aria-hidden="true" /> : null}
+
       <div className="app-shell-rail">{rail}</div>
 
       <aside className="app-shell-sidebar" aria-hidden={sidebarCollapsed}>
@@ -87,4 +98,6 @@ export function AppShell(props: AppShellProps) {
     </div>
   );
 }
+
+
 

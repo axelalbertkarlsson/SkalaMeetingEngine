@@ -5,11 +5,14 @@ import {
   CollapsibleSidebar,
   type SidebarGroupData
 } from "./components/shell/CollapsibleSidebar";
+import { DocumentsSidebar, type DocumentTreeItem } from "./components/shell/DocumentsSidebar";
 import { InspectorPane, type InspectorSection } from "./components/shell/InspectorPane";
 import { RibbonRail, type RibbonSection, type RibbonUtilityAction } from "./components/shell/RibbonRail";
 import { WorkspacePane } from "./components/shell/WorkspacePane";
+import { WindowTitleBar } from "./components/shell/WindowTitleBar";
 import {
   CodeIcon,
+  DocumentIcon,
   FolderIcon,
   GearIcon,
   HomeIcon,
@@ -17,7 +20,6 @@ import {
   MoonIcon,
   PanelBottomIcon,
   PanelLeftIcon,
-  PanelRightIcon,
   RunIcon,
   SunIcon,
   VaultIcon
@@ -28,11 +30,19 @@ import type { Run, RunStatus } from "./models/run";
 import { CodexScreen } from "./screens/CodexScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { MeetingsScreen } from "./screens/MeetingsScreen";
+import { DocumentsScreen } from "./screens/DocumentsScreen";
 import { RunsScreen } from "./screens/RunsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { VaultScreen } from "./screens/VaultScreen";
 
-type SectionId = "home" | "meetings" | "runs" | "vault" | "codex" | "settings";
+type SectionId =
+  | "home"
+  | "meetings"
+  | "vault"
+  | "documents"
+  | "runs"
+  | "codex"
+  | "settings";
 type ThemeMode = "dark" | "light";
 
 interface WorkspaceTabState {
@@ -46,8 +56,9 @@ interface WorkspaceTabState {
 const sectionTitles: Record<SectionId, string> = {
   home: "Home",
   meetings: "Meetings",
-  runs: "Runs",
   vault: "Vault",
+  documents: "Documents",
+  runs: "Runs",
   codex: "Codex",
   settings: "Settings"
 };
@@ -55,12 +66,41 @@ const sectionTitles: Record<SectionId, string> = {
 const railSections: RibbonSection[] = [
   { id: "home", label: "Home", icon: <HomeIcon /> },
   { id: "meetings", label: "Meetings", icon: <MeetingIcon /> },
-  { id: "runs", label: "Runs", icon: <RunIcon /> },
   { id: "vault", label: "Vault", icon: <VaultIcon /> },
+  { id: "documents", label: "Documents", icon: <DocumentIcon /> },
+  { id: "runs", label: "Runs", icon: <RunIcon /> },
   { id: "codex", label: "Codex", icon: <CodeIcon /> },
   { id: "settings", label: "Settings", icon: <GearIcon /> }
 ];
 
+const documentsSidebarFolders: DocumentTreeItem[] = [
+  { id: "documents-folder-bita", label: "Bita" },
+  { id: "documents-folder-dyve-internal", label: "Dyve Internal" },
+  { id: "documents-folder-gt", label: "GT" },
+  { id: "documents-folder-personligt", label: "Personligt" },
+  {
+    id: "documents-folder-pps",
+    label: "PPS",
+    children: [{ id: "documents-folder-konsultmatchare", label: "Konsultmatchare" }]
+  }
+];
+
+function findDocumentFolderLabel(items: DocumentTreeItem[], itemId: string): string | undefined {
+  for (const item of items) {
+    if (item.id === itemId) {
+      return item.label;
+    }
+
+    if (item.children?.length) {
+      const match = findDocumentFolderLabel(item.children, itemId);
+      if (match) {
+        return match;
+      }
+    }
+  }
+
+  return undefined;
+}
 const statusLabels: Record<RunStatus, string> = {
   queued: "Queued",
   running: "Running",
@@ -87,7 +127,7 @@ function createSectionTab(sectionId: SectionId): WorkspaceTabState {
     title: sectionTitles[sectionId],
     kind: "section",
     sectionId,
-    closable: sectionId !== "home"
+    closable: true
   };
 }
 
@@ -144,8 +184,9 @@ function App() {
     {
       home: "home-recent-run",
       meetings: "meetings-new-recording",
-      runs: "runs-running",
       vault: "vault-info",
+      documents: "documents-folder-bita",
+      runs: "runs-running",
       codex: "codex-workspace",
       settings: "settings-general"
     }
@@ -181,7 +222,7 @@ function App() {
             makeRunRow(
               `home-recent-${run.id}`,
               run.title,
-              `${statusLabels[run.status]} · ${new Date(run.startedAt).toLocaleDateString()}`,
+              `${statusLabels[run.status]} - ${new Date(run.startedAt).toLocaleDateString()}`,
               statusTone[run.status]
             )
           )
@@ -193,7 +234,7 @@ function App() {
             makeRunRow(
               `home-continue-${run.id}`,
               run.title,
-              `${statusLabels[run.status]} · ${run.type.replace("_", " ")}`,
+              `${statusLabels[run.status]} - ${run.type.replace("_", " ")}`,
               statusTone[run.status]
             )
           )
@@ -227,7 +268,7 @@ function App() {
             makeRunRow(
               `meetings-run-${run.id}`,
               run.title,
-              `${statusLabels[run.status]} · ${new Date(run.startedAt).toLocaleDateString()}`,
+              `${statusLabels[run.status]} - ${new Date(run.startedAt).toLocaleDateString()}`,
               statusTone[run.status]
             )
           )
@@ -308,10 +349,44 @@ function App() {
             makeRunRow(
               `vault-queue-${run.id}`,
               run.title,
-              `Ready for review · ${new Date(run.startedAt).toLocaleDateString()}`,
+              `Ready for review - ${new Date(run.startedAt).toLocaleDateString()}`,
               "warning"
             )
           )
+        }
+      ],
+      documents: [
+        {
+          id: "documents-workspace",
+          title: "Workspace",
+          items: [
+            { id: "documents-editor", label: "Markdown editor", meta: "Live write + preview" },
+            { id: "documents-scratch", label: "Scratch note", meta: "Quick capture buffer" }
+          ]
+        },
+        {
+          id: "documents-recent",
+          title: "Recent",
+          items: [
+            {
+              id: "documents-recent-kickoff",
+              label: "Q2 kickoff brief",
+              meta: "Last edited today"
+            },
+            {
+              id: "documents-recent-publish-checklist",
+              label: "Publish checklist",
+              meta: "Table and task list"
+            }
+          ]
+        },
+        {
+          id: "documents-templates",
+          title: "Templates",
+          items: [
+            { id: "documents-template-meeting", label: "Meeting note template", meta: "Summary + actions" },
+            { id: "documents-template-decision", label: "Decision log template", meta: "Owners + due dates" }
+          ]
         }
       ],
       codex: [
@@ -330,7 +405,7 @@ function App() {
             makeRunRow(
               `codex-session-${run.id}`,
               run.title,
-              `${statusLabels[run.status]} · ${new Date(run.startedAt).toLocaleDateString()}`,
+              `${statusLabels[run.status]} - ${new Date(run.startedAt).toLocaleDateString()}`,
               statusTone[run.status]
             )
           )
@@ -404,8 +479,23 @@ function App() {
   }, [setBottomPanelOpen, setInspectorOpen, setSidebarCollapsed]);
 
   const activeSidebarGroups = sidebarGroupsBySection[activeSection];
-  const selectedSidebarItemId =
-    selectedSidebarItems[activeSection] ?? activeSidebarGroups[0]?.items[0]?.id ?? "";
+  const selectedSidebarItemId = (() => {
+    const storedSelection = selectedSidebarItems[activeSection];
+    if (activeSection === "documents") {
+      if (storedSelection && storedSelection.startsWith("documents-folder-")) {
+        return storedSelection;
+      }
+
+      return documentsSidebarFolders[0]?.id ?? "";
+    }
+
+    return storedSelection ?? activeSidebarGroups[0]?.items[0]?.id ?? "";
+  })();
+
+  const selectedDocumentFolderLabel = findDocumentFolderLabel(
+    documentsSidebarFolders,
+    selectedSidebarItemId
+  );
 
   const activeTab =
     tabs.find((tab) => tab.id === activeTabId) ??
@@ -468,6 +558,28 @@ function App() {
       ];
     }
 
+    if (contentSection === "documents") {
+      return [
+        {
+          id: "documents-context",
+          title: "Document context",
+          rows: [
+            { label: "Mode", value: "Markdown editor" },
+            { label: "Selection", value: selectedDocumentFolderLabel ?? "None" },
+            { label: "Rendering", value: "Live preview with GFM" }
+          ]
+        },
+        {
+          id: "documents-capabilities",
+          title: "Capabilities",
+          rows: [
+            { label: "Blocks", value: "Headings, quotes, code, tables" },
+            { label: "Lists", value: "Bullets, numbered, checklists" },
+            { label: "Links", value: "Inline markdown link support" }
+          ]
+        }
+      ];
+    }
     if (contentSection === "vault") {
       return [
         {
@@ -537,7 +649,7 @@ function App() {
         ]
       }
     ];
-  }, [contentSection, runStats, selectedSidebarItemId, sortedRuns, theme, workspace]);
+  }, [contentSection, runStats, selectedDocumentFolderLabel, selectedSidebarItemId, sortedRuns, theme, workspace]);
 
   const bottomPanelViews = useMemo<BottomPanelView[]>(() => {
     return [
@@ -586,13 +698,6 @@ function App() {
       icon: <PanelLeftIcon />,
       active: !sidebarCollapsed,
       onClick: () => setSidebarCollapsed((current) => !current)
-    },
-    {
-      id: "inspector-toggle",
-      label: inspectorOpen ? "Close inspector (Ctrl/Cmd+I)" : "Open inspector (Ctrl/Cmd+I)",
-      icon: <PanelRightIcon />,
-      active: inspectorOpen,
-      onClick: () => setInspectorOpen((current) => !current)
     },
     {
       id: "bottom-toggle",
@@ -678,6 +783,29 @@ function App() {
     }
   };
 
+  const reorderTabs = (draggedTabId: string, targetTabId: string, placement: "before" | "after") => {
+    if (draggedTabId === targetTabId) {
+      return;
+    }
+
+    setTabs((currentTabs) => {
+      const draggedTab = currentTabs.find((tab) => tab.id === draggedTabId);
+      if (!draggedTab) {
+        return currentTabs;
+      }
+
+      const withoutDragged = currentTabs.filter((tab) => tab.id !== draggedTabId);
+      const targetIndex = withoutDragged.findIndex((tab) => tab.id === targetTabId);
+      if (targetIndex === -1) {
+        return currentTabs;
+      }
+
+      const insertIndex = placement === "after" ? targetIndex + 1 : targetIndex;
+      withoutDragged.splice(insertIndex, 0, draggedTab);
+      return withoutDragged;
+    });
+  };
+
   const beginInspectorResize = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!inspectorOpen) {
       return;
@@ -741,6 +869,9 @@ function App() {
       return <MeetingsScreen runs={sortedRuns} />;
     }
 
+    if (sectionId === "documents") {
+      return <DocumentsScreen theme={theme} />;
+    }
     if (sectionId === "runs") {
       return <RunsScreen runs={sortedRuns} />;
     }
@@ -795,24 +926,55 @@ function App() {
           sections={railSections}
           activeSectionId={activeSection}
           onSelectSection={(sectionId) => openSection(sectionId as SectionId)}
-          utilityActions={utilityActions}
+          utilityActions={utilityActions.filter((a) => a.id !== "sidebar-toggle")}
         />
+      }
+      leftHeader={
+        <header className="left-pane-header">
+          <div className="left-pane-header-rail">
+            <button
+              type="button"
+              className="left-pane-toggle"
+              onClick={() => setSidebarCollapsed((current) => !current)}
+              title={sidebarCollapsed ? "Show sidebar (Ctrl/Cmd+B)" : "Hide sidebar (Ctrl/Cmd+B)"}
+              aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            >
+              <PanelLeftIcon />
+            </button>
+          </div>
+          <div className="left-pane-header-sidebar" aria-hidden={sidebarCollapsed}>
+            <p className="sidebar-title">{sectionTitles[activeSection]}</p>
+          </div>
+        </header>
       }
       sidebar={
-        <CollapsibleSidebar
-          title={sectionTitles[activeSection]}
-          collapsed={sidebarCollapsed}
-          groups={activeSidebarGroups}
-          selectedItemId={selectedSidebarItemId}
-          onSelectItem={(itemId) =>
-            setSelectedSidebarItems((current) => ({
-              ...current,
-              [activeSection]: itemId
-            }))
-          }
-          onToggleCollapse={() => setSidebarCollapsed((current) => !current)}
-        />
+        activeSection === "documents" ? (
+          <DocumentsSidebar
+            collapsed={sidebarCollapsed}
+            folders={documentsSidebarFolders}
+            selectedItemId={selectedSidebarItemId}
+            onSelectItem={(itemId) =>
+              setSelectedSidebarItems((current) => ({
+                ...current,
+                [activeSection]: itemId
+              }))
+            }
+          />
+        ) : (
+          <CollapsibleSidebar
+            collapsed={sidebarCollapsed}
+            groups={activeSidebarGroups}
+            selectedItemId={selectedSidebarItemId}
+            onSelectItem={(itemId) =>
+              setSelectedSidebarItems((current) => ({
+                ...current,
+                [activeSection]: itemId
+              }))
+            }
+          />
+        )
       }
+      topRightControls={<WindowTitleBar inspectorOpen={inspectorOpen} onToggleInspector={() => setInspectorOpen((current) => !current)} />}
       workspace={
         <WorkspacePane
           tabs={tabs}
@@ -820,6 +982,7 @@ function App() {
           onSelectTab={selectTab}
           onCloseTab={closeTab}
           onCreateTab={createScratchTab}
+          onReorderTabs={reorderTabs}
         >
           {renderWorkspaceContent()}
         </WorkspacePane>
@@ -836,7 +999,7 @@ function App() {
       <footer className="shell-status muted">
         <FolderIcon />
         <span>
-          Workspace: {workspace.name} · Local artifacts: {artifacts.length}
+          Workspace: {workspace.name} - Local artifacts: {artifacts.length}
         </span>
       </footer>
     </AppShell>
@@ -844,5 +1007,12 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
 
 
