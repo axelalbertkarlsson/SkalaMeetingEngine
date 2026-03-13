@@ -84,6 +84,13 @@ pub struct StopCodexProcessRequest {
     pub session_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ResizeCodexTerminalRequest {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 #[derive(Debug, Serialize, Clone)]
 struct TerminalChunkPayload {
     session_id: String,
@@ -499,4 +506,50 @@ pub fn stop_codex_process(
             ),
         }),
     }
+}
+
+#[tauri::command]
+pub fn resize_codex_terminal(
+    state: State<CodexSessionState>,
+    request: ResizeCodexTerminalRequest,
+) -> Result<OperationAck, String> {
+    let Some(session) = state.get(&request.session_id)? else {
+        return Ok(OperationAck {
+            ok: true,
+            message: format!(
+                "Session '{}' is already stopped or does not exist.",
+                request.session_id
+            ),
+        });
+    };
+
+    let cols = request.cols.max(2);
+    let rows = request.rows.max(2);
+
+    let master_guard = session
+        ._master
+        .lock()
+        .map_err(|_| "codex pty master lock poisoned".to_string())?;
+
+    master_guard
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| {
+            format!(
+                "Failed to resize session '{}': {}",
+                request.session_id, error
+            )
+        })?;
+
+    Ok(OperationAck {
+        ok: true,
+        message: format!(
+            "Resized session '{}' to {}x{}.",
+            request.session_id, cols, rows
+        ),
+    })
 }

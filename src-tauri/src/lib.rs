@@ -10,7 +10,8 @@ pub fn run() {
             commands::transcription::get_transcription_job_status,
             commands::codex::spawn_codex_process,
             commands::codex::send_codex_input,
-            commands::codex::stop_codex_process
+            commands::codex::stop_codex_process,
+            commands::codex::resize_codex_terminal
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skala Meeting Engine");

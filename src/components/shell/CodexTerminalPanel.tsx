@@ -32,6 +32,7 @@ interface CodexTerminalPanelProps {
   onStop: () => void;
   onClear: () => void;
   onSendInput: (input: string) => void;
+  onResizeTerminal: (cols: number, rows: number) => void;
 }
 
 function statusLabel(session: CodexSessionState) {
@@ -42,7 +43,6 @@ function statusLabel(session: CodexSessionState) {
 
   return `${base} (exit ${session.lastExitCode})`;
 }
-
 
 function formatEntry(entry: CodexTerminalEntry) {
   const rawChunk = entry.chunk;
@@ -55,13 +55,12 @@ function formatEntry(entry: CodexTerminalEntry) {
 }
 
 export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
-  const { session, entries, onStart, onStop, onClear, onSendInput } = props;
+  const { session, entries, onStart, onStop, onClear, onSendInput, onResizeTerminal } = props;
 
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const renderedCountRef = useRef(0);
-  const inputBufferRef = useRef("");
 
   const canStart = session.status === "idle" || session.status === "stopped" || session.status === "error";
   const canStop = session.status === "running" || session.status === "starting";
@@ -86,7 +85,15 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(hostRef.current);
+
+    const reportTerminalSize = () => {
+      if (terminal.cols > 0 && terminal.rows > 0) {
+        onResizeTerminal(terminal.cols, terminal.rows);
+      }
+    };
+
     fitAddon.fit();
+    reportTerminalSize();
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
@@ -96,39 +103,13 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
         return;
       }
 
-      if (input === "\r") {
-        terminal.write("\r\n");
-        const command = inputBufferRef.current;
-        inputBufferRef.current = "";
-        onSendInput(`${command}\n`);
-        return;
-      }
-
-      if (input === "\u007F") {
-        if (inputBufferRef.current.length === 0) {
-          return;
-        }
-
-        inputBufferRef.current = inputBufferRef.current.slice(0, -1);
-        terminal.write("\b \b");
-        return;
-      }
-
-      if (input === "\u0003") {
-        terminal.write("^C");
-        inputBufferRef.current = "";
-        onSendInput("\u0003");
-        return;
-      }
-
-      if (input >= " ") {
-        inputBufferRef.current += input;
-        terminal.write(input);
-      }
+      // PTY-backed Codex expects raw key/input sequences, including control and arrow keys.
+      onSendInput(input);
     });
 
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
+      reportTerminalSize();
     });
     resizeObserver.observe(hostRef.current);
 
@@ -139,9 +120,8 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
       terminalRef.current = null;
       fitAddonRef.current = null;
       renderedCountRef.current = 0;
-      inputBufferRef.current = "";
     };
-  }, [onSendInput, session.status]);
+  }, [onResizeTerminal, onSendInput, session.status]);
 
   useEffect(() => {
     const terminal = terminalRef.current;

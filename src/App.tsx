@@ -1180,6 +1180,29 @@ function App() {
     [appendTerminalEntry, codexSession.sessionId, codexSession.status]
   );
 
+
+  const handleResizeCodexTerminal = useCallback(
+    (cols: number, rows: number) => {
+      void (async () => {
+        if (!codexSession.sessionId || codexSession.status !== "running") {
+          return;
+        }
+
+        try {
+          await invoke<OperationAck>("resize_codex_terminal", {
+            request: {
+              session_id: codexSession.sessionId,
+              cols,
+              rows
+            }
+          });
+        } catch {
+          // Resize events are frequent and best-effort only.
+        }
+      })();
+    },
+    [codexSession.sessionId, codexSession.status]
+  );
   const handleClearTerminal = useCallback(() => {
     setCodexTerminalEntries([]);
   }, []);
@@ -1382,6 +1405,7 @@ function App() {
             onStop={handleStopCodexSession}
             onClear={handleClearTerminal}
             onSendInput={handleSendCodexInput}
+            onResizeTerminal={handleResizeCodexTerminal}
           />
         )
       });
@@ -1396,6 +1420,7 @@ function App() {
     contentSection,
     handleClearTerminal,
     handleSendCodexInput,
+    handleResizeCodexTerminal,
     handleStartCodexSession,
     handleStopCodexSession,
     inspectorOpen,
@@ -1774,6 +1799,11 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
 
 
 
