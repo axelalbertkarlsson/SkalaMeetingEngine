@@ -147,6 +147,7 @@ table {
   grid-row: 1;
   min-width: 0;
   min-height: 0;
+  border-left: 0;
   background: var(--shell-workspace-bg);
 }
 
@@ -280,6 +281,44 @@ table {
   margin-top: 36px;
   height: calc(100% - 36px);
   cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 3;
+  overflow: visible;
+}
+
+.pane-handle-left {
+  grid-column: 3;
+  width: 0;
+}
+
+.pane-handle-right {
+  grid-column: 5;
+  background: var(--border-color);
+}
+
+
+.pane-handle-vertical::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  width: 12px;
+  height: 100%;
+  background: transparent;
+}
+
+.pane-handle-left::after {
+  left: -6px;
+  transform: none;
+}
+
+.pane-handle-vertical:hover {
+  background: transparent;
+}
+
+.pane-handle-right:hover {
   background: var(--border-color);
 }
 
@@ -1147,6 +1186,22 @@ table {
 .settings-path-button:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
+}
+
+.settings-toggle-row {
+  margin-top: var(--space-2);
+}
+
+.settings-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  margin-bottom: 6px;
+}
+
+.settings-toggle-label input {
+  margin: 0;
 }
 
 .terminal-pane pre {

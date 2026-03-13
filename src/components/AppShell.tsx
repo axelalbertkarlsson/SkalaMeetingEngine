@@ -8,6 +8,7 @@ interface AppShellProps {
   inspectorWidth: number;
   bottomPanelOpen: boolean;
   bottomPanelHeight: number;
+  onSidebarResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onInspectorResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onBottomPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   rail: ReactNode;
@@ -28,6 +29,7 @@ export function AppShell(props: AppShellProps) {
     inspectorWidth,
     bottomPanelOpen,
     bottomPanelHeight,
+    onSidebarResizeStart,
     onInspectorResizeStart,
     onBottomPanelResizeStart,
     rail,
@@ -41,11 +43,11 @@ export function AppShell(props: AppShellProps) {
   } = props;
 
   const style = {
-    "--sidebar-size": sidebarCollapsed ? "0px" : `${sidebarWidth}px`,
+    "--sidebar-size": sidebarCollapsed ? "0px" : `${Math.round(sidebarWidth)}px`,
     "--sidebar-handle-size": "0px",
-    "--inspector-size": inspectorOpen ? `${inspectorWidth}px` : "0px",
+    "--inspector-size": inspectorOpen ? `${Math.round(inspectorWidth)}px` : "0px",
     "--inspector-handle-size": inspectorOpen ? "1px" : "0px",
-    "--bottom-size": bottomPanelOpen ? `${bottomPanelHeight}px` : "0px",
+    "--bottom-size": bottomPanelOpen ? `${Math.round(bottomPanelHeight)}px` : "0px",
     "--tabs-right-padding": inspectorOpen ? "8px" : "calc(var(--window-controls-width) + 8px)"
   } as CSSProperties;
 
@@ -63,11 +65,23 @@ export function AppShell(props: AppShellProps) {
         {sidebar}
       </aside>
 
+      {!sidebarCollapsed && (
+        <div
+          className="pane-handle pane-handle-vertical pane-handle-left"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          onMouseDown={onSidebarResizeStart}
+        >
+          <Divider orientation="vertical" />
+        </div>
+      )}
+
       <main className="app-shell-workspace">{workspace}</main>
 
       {inspectorOpen && (
         <div
-          className="pane-handle pane-handle-vertical"
+          className="pane-handle pane-handle-vertical pane-handle-right"
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize inspector"
@@ -98,6 +112,4 @@ export function AppShell(props: AppShellProps) {
     </div>
   );
 }
-
-
 
