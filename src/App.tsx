@@ -65,18 +65,12 @@ interface OperationAck {
   message: string;
 }
 
-interface TerminalChunkEventPayload {
-  session_id: string;
-  stream: CodexTerminalStream;
-  chunk: string;
-}
 
 interface TerminalExitEventPayload {
   session_id: string;
   code: number | null;
 }
 
-const TERMINAL_CHUNK_EVENT = "codex://terminal-chunk";
 const TERMINAL_EXIT_EVENT = "codex://terminal-exit";
 
 interface WorkspaceTabState {
@@ -415,11 +409,15 @@ function App() {
     lastExitCode: null
   });
   const [codexTerminalEntries, setCodexTerminalEntries] = useState<CodexTerminalEntry[]>([]);
+  const [codexTerminalClearSignal, setCodexTerminalClearSignal] = useState(0);
   const [codexCommandPath, setCodexCommandPath] = useLocalStorageState<string>(
     "settings.codex.commandPath",
     "codex"
   );
-
+  const [codexDisableAltScreen, setCodexDisableAltScreen] = useLocalStorageState<boolean>(
+    "settings.codex.disableAltScreen",
+    true
+  );
   const sortedRuns = useMemo(() => sortRunsByStartedAt(runs), []);
 
   const runStats = useMemo(
@@ -432,7 +430,7 @@ function App() {
   );
 
   const appendTerminalEntry = useCallback((entry: CodexTerminalEntry) => {
-    setCodexTerminalEntries((current) => [...current.slice(-1999), entry]);
+    setCodexTerminalEntries((current) => [...current.slice(-499), entry]);
   }, []);
 
   const sidebarGroupsBySection = useMemo<Record<SectionId, SidebarGroupData[]>>(() => {
@@ -720,14 +718,6 @@ function App() {
 
     const attachListeners = async () => {
       try {
-        const unlistenChunk = await listen<TerminalChunkEventPayload>(TERMINAL_CHUNK_EVENT, (event) => {
-          appendTerminalEntry({
-            sessionId: event.payload.session_id,
-            stream: event.payload.stream,
-            chunk: event.payload.chunk
-          });
-        });
-
         const unlistenExit = await listen<TerminalExitEventPayload>(TERMINAL_EXIT_EVENT, (event) => {
           setCodexSession((current) => {
             if (current.sessionId !== event.payload.session_id) {
@@ -753,12 +743,11 @@ function App() {
         });
 
         if (disposed) {
-          unlistenChunk();
           unlistenExit();
           return;
         }
 
-        unlistenFns.push(unlistenChunk, unlistenExit);
+        unlistenFns.push(unlistenExit);
       } catch (error) {
         appendTerminalEntry({
           sessionId: "unknown",
@@ -1086,7 +1075,7 @@ function App() {
           request: {
             workspace_path: workspace.rootPath,
             command: commandPath,
-            args: ["--no-alt-screen"]
+            args: codexDisableAltScreen ? ["--no-alt-screen"] : []
           }
         });
 
@@ -1111,7 +1100,7 @@ function App() {
         });
       }
     })();
-  }, [appendTerminalEntry, codexCommandPath, codexSession.sessionId, codexSession.status, workspace.rootPath]);
+  }, [appendTerminalEntry, codexCommandPath, codexDisableAltScreen, codexSession.sessionId, codexSession.status, workspace.rootPath]);
 
   const handleStopCodexSession = useCallback(() => {
     void (async () => {
@@ -1205,6 +1194,7 @@ function App() {
   );
   const handleClearTerminal = useCallback(() => {
     setCodexTerminalEntries([]);
+    setCodexTerminalClearSignal((current) => current + 1);
   }, []);
 
   useEffect(() => {
@@ -1324,7 +1314,7 @@ function App() {
           id: "codex-next",
           title: "Bridge state",
           rows: [
-            { label: "Entries", value: String(codexTerminalEntries.length) },
+            { label: "System entries", value: String(codexTerminalEntries.length) },
             { label: "Last exit", value: codexSession.lastExitCode === null ? "N/A" : String(codexSession.lastExitCode) }
           ]
         }
@@ -1401,6 +1391,7 @@ function App() {
           <CodexTerminalPanel
             session={codexSession}
             entries={codexTerminalEntries}
+            clearSignal={codexTerminalClearSignal}
             onStart={handleStartCodexSession}
             onStop={handleStopCodexSession}
             onClear={handleClearTerminal}
@@ -1416,6 +1407,7 @@ function App() {
     bottomPanelHeight,
     bottomPanelOpen,
     codexSession,
+    codexTerminalClearSignal,
     codexTerminalEntries,
     contentSection,
     handleClearTerminal,
@@ -1565,6 +1557,31 @@ function App() {
     });
   };
 
+  const beginSidebarResize = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (sidebarCollapsed) {
+      return;
+    }
+
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    document.body.style.cursor = "col-resize";
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const nextWidth = Math.round(clamp(startWidth + (moveEvent.clientX - startX), 220, 360));
+      setSidebarWidth(nextWidth);
+    };
+
+    const onMouseUp = () => {
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  };
+
   const beginInspectorResize = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!inspectorOpen) {
       return;
@@ -1576,7 +1593,7 @@ function App() {
     document.body.style.cursor = "col-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextWidth = clamp(startWidth - (moveEvent.clientX - startX), 260, 340);
+      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 260, 340));
       setInspectorWidth(nextWidth);
     };
 
@@ -1601,7 +1618,8 @@ function App() {
     document.body.style.cursor = "row-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextHeight = clamp(startHeight + (startY - moveEvent.clientY), 140, 320);
+      const maxBottomHeight = Math.max(220, window.innerHeight - 140);
+      const nextHeight = Math.round(clamp(startHeight + (startY - moveEvent.clientY), 140, maxBottomHeight));
       setBottomPanelHeight(nextHeight);
     };
 
@@ -1648,7 +1666,9 @@ function App() {
         workspace={workspace}
         selectedCategory={settingsCategory}
         codexCommandPath={codexCommandPath}
+        codexDisableAltScreen={codexDisableAltScreen}
         onCodexCommandPathChange={setCodexCommandPath}
+        onCodexDisableAltScreenChange={setCodexDisableAltScreen}
       />
     );
   };
@@ -1686,6 +1706,7 @@ function App() {
       inspectorWidth={inspectorWidth}
       bottomPanelOpen={bottomPanelOpen}
       bottomPanelHeight={bottomPanelHeight}
+      onSidebarResizeStart={beginSidebarResize}
       onInspectorResizeStart={beginInspectorResize}
       onBottomPanelResizeStart={beginBottomResize}
       rail={
@@ -1799,33 +1820,6 @@ function App() {
 }
 
 export default App;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

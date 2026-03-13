@@ -6,7 +6,9 @@ interface SettingsScreenProps {
   workspace: Workspace;
   selectedCategory: string;
   codexCommandPath: string;
+  codexDisableAltScreen: boolean;
   onCodexCommandPathChange: (value: string) => void;
+  onCodexDisableAltScreenChange: (value: boolean) => void;
 }
 
 const codexPathSuggestions = [
@@ -21,7 +23,9 @@ export function SettingsScreen({
   workspace,
   selectedCategory,
   codexCommandPath,
-  onCodexCommandPathChange
+  codexDisableAltScreen,
+  onCodexCommandPathChange,
+  onCodexDisableAltScreenChange
 }: SettingsScreenProps) {
   const [draftCodexPath, setDraftCodexPath] = useState(codexCommandPath);
 
@@ -75,11 +79,12 @@ export function SettingsScreen({
     },
     "settings-codex": {
       title: "Codex",
-      description: "Configure the executable used by the embedded terminal session.",
+      description: "Configure the executable and terminal mode used by the embedded Codex session.",
       rows: [
         { label: "Execution mode", value: "Local subprocess" },
         { label: "Workspace binding", value: workspace.rootPath },
-        { label: "Configured command", value: codexCommandPath || "codex" }
+        { label: "Configured command", value: codexCommandPath || "codex" },
+        { label: "Terminal mode", value: codexDisableAltScreen ? "Compact (--no-alt-screen)" : "Full screen" }
       ]
     }
   };
@@ -141,6 +146,20 @@ export function SettingsScreen({
                 {path}
               </button>
             ))}
+          </div>
+
+          <div className="settings-toggle-row">
+            <label className="settings-toggle-label">
+              <input
+                type="checkbox"
+                checked={codexDisableAltScreen}
+                onChange={(event) => onCodexDisableAltScreenChange(event.target.checked)}
+              />
+              Use compact mode (<code>--no-alt-screen</code>)
+            </label>
+            <p className="muted settings-help-copy">
+              Compact mode can reduce full-screen redraws in the dock. Turn it off for native full-screen Codex UI.
+            </p>
           </div>
         </article>
       )}
