@@ -1,12 +1,34 @@
-﻿import { PaneHeader } from "../components/shell/PaneHeader";
+import { useEffect, useState } from "react";
+import { PaneHeader } from "../components/shell/PaneHeader";
 import type { Workspace } from "../models/workspace";
 
 interface SettingsScreenProps {
   workspace: Workspace;
   selectedCategory: string;
+  codexCommandPath: string;
+  onCodexCommandPathChange: (value: string) => void;
 }
 
-export function SettingsScreen({ workspace, selectedCategory }: SettingsScreenProps) {
+const codexPathSuggestions = [
+  "codex",
+  "C:/Users/AxelKarlsson/AppData/Roaming/npm/codex.cmd",
+  "C:/Users/AxelKarlsson/AppData/Roaming/npm/codex.ps1",
+  "C:/Program Files/WindowsApps/OpenAI.Codex_26.306.996.0_x64__2p2nqsd0c76g0/app/Codex.exe",
+  "C:/Program Files/WindowsApps/OpenAI.Codex_26.306.996.0_x64__2p2nqsd0c76g0/app/resources/codex.exe"
+];
+
+export function SettingsScreen({
+  workspace,
+  selectedCategory,
+  codexCommandPath,
+  onCodexCommandPathChange
+}: SettingsScreenProps) {
+  const [draftCodexPath, setDraftCodexPath] = useState(codexCommandPath);
+
+  useEffect(() => {
+    setDraftCodexPath(codexCommandPath);
+  }, [codexCommandPath]);
+
   const categoryCopy: Record<
     string,
     {
@@ -53,11 +75,11 @@ export function SettingsScreen({ workspace, selectedCategory }: SettingsScreenPr
     },
     "settings-codex": {
       title: "Codex",
-      description: "Shell readiness for local Codex CLI sessions.",
+      description: "Configure the executable used by the embedded terminal session.",
       rows: [
-        { label: "Execution mode", value: "Local subprocess (planned)" },
+        { label: "Execution mode", value: "Local subprocess" },
         { label: "Workspace binding", value: workspace.rootPath },
-        { label: "Output surface", value: "Bottom panel and terminal pane" }
+        { label: "Configured command", value: codexCommandPath || "codex" }
       ]
     }
   };
@@ -79,6 +101,50 @@ export function SettingsScreen({ workspace, selectedCategory }: SettingsScreenPr
         </dl>
       </article>
 
+      {selectedCategory === "settings-codex" && (
+        <article className="pane-block">
+          <h3 className="block-title">Codex executable path</h3>
+          <p className="muted settings-help-copy">
+            Set the command or full executable path used when starting a Codex session. On Windows,
+            <code>codex.cmd</code> and <code>codex.ps1</code> paths are handled automatically.
+          </p>
+
+          <div className="settings-input-row">
+            <input
+              className="settings-text-input"
+              type="text"
+              value={draftCodexPath}
+              onChange={(event) => setDraftCodexPath(event.target.value)}
+              placeholder="codex"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              className="codex-terminal-button"
+              onClick={() => onCodexCommandPathChange(draftCodexPath.trim())}
+            >
+              Apply
+            </button>
+          </div>
+
+          <div className="settings-quick-paths">
+            {codexPathSuggestions.map((path) => (
+              <button
+                key={path}
+                type="button"
+                className="settings-path-button"
+                onClick={() => {
+                  setDraftCodexPath(path);
+                  onCodexCommandPathChange(path);
+                }}
+              >
+                {path}
+              </button>
+            ))}
+          </div>
+        </article>
+      )}
+
       <article className="pane-block">
         <h3 className="block-title">Review-first note</h3>
         <p className="muted">
@@ -89,4 +155,3 @@ export function SettingsScreen({ workspace, selectedCategory }: SettingsScreenPr
     </section>
   );
 }
-

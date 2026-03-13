@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
 import { BottomPanel, type BottomPanelView } from "./components/shell/BottomPanel";
+import { ConfirmDialog } from "./components/shell/ConfirmDialog";
+import {
+  CodexTerminalPanel,
+  type CodexSessionState,
+  type CodexTerminalEntry,
+  type CodexTerminalStream
+} from "./components/shell/CodexTerminalPanel";
 import {
   CollapsibleSidebar,
   type SidebarGroupData
@@ -45,11 +54,37 @@ type SectionId =
   | "settings";
 type ThemeMode = "dark" | "light";
 
+interface SpawnCodexProcessResponse {
+  session_id: string;
+  status: string;
+  message: string;
+}
+
+interface OperationAck {
+  ok: boolean;
+  message: string;
+}
+
+interface TerminalChunkEventPayload {
+  session_id: string;
+  stream: CodexTerminalStream;
+  chunk: string;
+}
+
+interface TerminalExitEventPayload {
+  session_id: string;
+  code: number | null;
+}
+
+const TERMINAL_CHUNK_EVENT = "codex://terminal-chunk";
+const TERMINAL_EXIT_EVENT = "codex://terminal-exit";
+
 interface WorkspaceTabState {
   id: string;
   title: string;
-  kind: "section" | "scratch";
+  kind: "section" | "scratch" | "document";
   sectionId?: SectionId;
+  documentItemId?: string;
   closable: boolean;
 }
 
@@ -73,26 +108,31 @@ const railSections: RibbonSection[] = [
   { id: "settings", label: "Settings", icon: <GearIcon /> }
 ];
 
-const documentsSidebarFolders: DocumentTreeItem[] = [
-  { id: "documents-folder-bita", label: "Bita" },
-  { id: "documents-folder-dyve-internal", label: "Dyve Internal" },
-  { id: "documents-folder-gt", label: "GT" },
-  { id: "documents-folder-personligt", label: "Personligt" },
+const initialDocumentsSidebarItems: DocumentTreeItem[] = [
+  { id: "documents-folder-bita", label: "Bita", kind: "folder" },
+  { id: "documents-folder-dyve-internal", label: "Dyve Internal", kind: "folder" },
+  { id: "documents-folder-gt", label: "GT", kind: "folder" },
+  { id: "documents-folder-personligt", label: "Personligt", kind: "folder" },
   {
     id: "documents-folder-pps",
     label: "PPS",
-    children: [{ id: "documents-folder-konsultmatchare", label: "Konsultmatchare" }]
+    kind: "folder",
+    children: [{ id: "documents-folder-konsultmatchare", label: "Konsultmatchare", kind: "folder" }]
   }
 ];
 
-function findDocumentFolderLabel(items: DocumentTreeItem[], itemId: string): string | undefined {
+function isDocumentFolder(item: DocumentTreeItem) {
+  return item.kind !== "note";
+}
+
+function findDocumentItem(items: DocumentTreeItem[], itemId: string): DocumentTreeItem | undefined {
   for (const item of items) {
     if (item.id === itemId) {
-      return item.label;
+      return item;
     }
 
     if (item.children?.length) {
-      const match = findDocumentFolderLabel(item.children, itemId);
+      const match = findDocumentItem(item.children, itemId);
       if (match) {
         return match;
       }
@@ -101,6 +141,168 @@ function findDocumentFolderLabel(items: DocumentTreeItem[], itemId: string): str
 
   return undefined;
 }
+
+function countDocumentItemsByKind(items: DocumentTreeItem[], kind: "folder" | "note"): number {
+  return items.reduce((count, item) => {
+    const ownCount = (item.kind ?? "folder") === kind ? 1 : 0;
+    const childrenCount = item.children?.length ? countDocumentItemsByKind(item.children, kind) : 0;
+    return count + ownCount + childrenCount;
+  }, 0);
+}
+
+function findDocumentParentFolderId(
+  items: DocumentTreeItem[],
+  itemId: string,
+  parentFolderId: string | null = null
+): string | null {
+  for (const item of items) {
+    if (item.id === itemId) {
+      return parentFolderId;
+    }
+
+    if (item.children?.length) {
+      const nextParentFolderId = isDocumentFolder(item) ? item.id : parentFolderId;
+      const match = findDocumentParentFolderId(item.children, itemId, nextParentFolderId);
+      if (match !== null) {
+        return match;
+      }
+    }
+  }
+
+  return null;
+}
+
+function appendDocumentItem(
+  items: DocumentTreeItem[],
+  parentFolderId: string | null,
+  nextItem: DocumentTreeItem
+): DocumentTreeItem[] {
+  if (!parentFolderId) {
+    return [...items, nextItem];
+  }
+
+  const updatedItems = items.map((item) => {
+    if (item.id === parentFolderId && isDocumentFolder(item)) {
+      return {
+        ...item,
+        children: [...(item.children ?? []), nextItem]
+      };
+    }
+
+    if (item.children?.length) {
+      return {
+        ...item,
+        children: appendDocumentItem(item.children, parentFolderId, nextItem)
+      };
+    }
+
+    return item;
+  });
+
+  return updatedItems;
+}
+
+function updateDocumentLabel(
+  items: DocumentTreeItem[],
+  itemId: string,
+  nextLabel: string
+): DocumentTreeItem[] {
+  return items.map((item) => {
+    if (item.id === itemId) {
+      return {
+        ...item,
+        label: nextLabel
+      };
+    }
+
+    if (item.children?.length) {
+      return {
+        ...item,
+        children: updateDocumentLabel(item.children, itemId, nextLabel)
+      };
+    }
+
+    return item;
+  });
+}
+
+function removeDocumentItem(
+  items: DocumentTreeItem[],
+  itemId: string
+): { items: DocumentTreeItem[]; removedIds: string[] } {
+  const removedIds: string[] = [];
+
+  const nextItems = items.flatMap((item) => {
+    if (item.id === itemId) {
+      const collectRemoved = (entry: DocumentTreeItem) => {
+        removedIds.push(entry.id);
+        entry.children?.forEach(collectRemoved);
+      };
+      collectRemoved(item);
+      return [];
+    }
+
+    if (item.children?.length) {
+      const result = removeDocumentItem(item.children, itemId);
+      if (result.removedIds.length) {
+        removedIds.push(...result.removedIds);
+        return [
+          {
+            ...item,
+            children: result.items
+          }
+        ];
+      }
+    }
+
+    return [item];
+  });
+
+  return {
+    items: nextItems,
+    removedIds
+  };
+}
+
+function findDocumentLabelPath(
+  items: DocumentTreeItem[],
+  itemId: string,
+  segments: string[] = []
+): string[] | null {
+  for (const item of items) {
+    const nextSegments = [...segments, item.label];
+
+    if (item.id === itemId) {
+      return nextSegments;
+    }
+
+    if (item.children?.length) {
+      const found = findDocumentLabelPath(item.children, itemId, nextSegments);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function createDocumentItemId(kind: "folder" | "note") {
+  const randomSuffix = Math.random().toString(36).slice(2, 8);
+  return `documents-${kind}-${Date.now()}-${randomSuffix}`;
+}
+
+function cloneDocumentItem(item: DocumentTreeItem): DocumentTreeItem {
+  const itemKind = item.kind ?? "folder";
+
+  return {
+    id: createDocumentItemId(itemKind),
+    label: item.label,
+    kind: itemKind,
+    children: item.children?.map(cloneDocumentItem)
+  };
+}
+
 const statusLabels: Record<RunStatus, string> = {
   queued: "Queued",
   running: "Running",
@@ -149,6 +351,10 @@ function sortRunsByStartedAt(items: Run[]) {
   return [...items].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 }
 
+function isTauriRuntime() {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 function App() {
   const workspace = workspaces[0];
 
@@ -192,6 +398,28 @@ function App() {
     }
   );
 
+  const [documentsSidebarItems, setDocumentsSidebarItems] = useLocalStorageState<DocumentTreeItem[]>(
+    "documents.sidebarItems",
+    initialDocumentsSidebarItems
+  );
+  const [pendingDelete, setPendingDelete] = useState<{
+    itemId: string;
+    label: string;
+    kind: "folder" | "note";
+  } | null>(null);
+
+  const [codexSession, setCodexSession] = useState<CodexSessionState>({
+    sessionId: null,
+    status: "idle",
+    message: "Ready",
+    lastExitCode: null
+  });
+  const [codexTerminalEntries, setCodexTerminalEntries] = useState<CodexTerminalEntry[]>([]);
+  const [codexCommandPath, setCodexCommandPath] = useLocalStorageState<string>(
+    "settings.codex.commandPath",
+    "codex"
+  );
+
   const sortedRuns = useMemo(() => sortRunsByStartedAt(runs), []);
 
   const runStats = useMemo(
@@ -202,6 +430,10 @@ function App() {
     }),
     []
   );
+
+  const appendTerminalEntry = useCallback((entry: CodexTerminalEntry) => {
+    setCodexTerminalEntries((current) => [...current.slice(-1999), entry]);
+  }, []);
 
   const sidebarGroupsBySection = useMemo<Record<SectionId, SidebarGroupData[]>>(() => {
     const recentMeetingRuns = sortedRuns.filter(
@@ -478,31 +710,508 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [setBottomPanelOpen, setInspectorOpen, setSidebarCollapsed]);
 
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    const unlistenFns: UnlistenFn[] = [];
+    let disposed = false;
+
+    const attachListeners = async () => {
+      try {
+        const unlistenChunk = await listen<TerminalChunkEventPayload>(TERMINAL_CHUNK_EVENT, (event) => {
+          appendTerminalEntry({
+            sessionId: event.payload.session_id,
+            stream: event.payload.stream,
+            chunk: event.payload.chunk
+          });
+        });
+
+        const unlistenExit = await listen<TerminalExitEventPayload>(TERMINAL_EXIT_EVENT, (event) => {
+          setCodexSession((current) => {
+            if (current.sessionId !== event.payload.session_id) {
+              return current;
+            }
+
+            return {
+              sessionId: current.sessionId,
+              status: "stopped",
+              message: `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}.`,
+              lastExitCode: event.payload.code
+            };
+          });
+
+          appendTerminalEntry({
+            sessionId: event.payload.session_id,
+            stream: "system",
+            chunk:
+              event.payload.code === null
+                ? "\n[system] Codex process exited.\n"
+                : `\n[system] Codex process exited with code ${event.payload.code}.\n`
+          });
+        });
+
+        if (disposed) {
+          unlistenChunk();
+          unlistenExit();
+          return;
+        }
+
+        unlistenFns.push(unlistenChunk, unlistenExit);
+      } catch (error) {
+        appendTerminalEntry({
+          sessionId: "unknown",
+          stream: "system",
+          chunk: `\n[system] Failed to register terminal listeners: ${String(error)}\n`
+        });
+      }
+    };
+
+    void attachListeners();
+
+    return () => {
+      disposed = true;
+      unlistenFns.forEach((unlisten) => {
+        unlisten();
+      });
+    };
+  }, [appendTerminalEntry]);
+
   const activeSidebarGroups = sidebarGroupsBySection[activeSection];
   const selectedSidebarItemId = (() => {
     const storedSelection = selectedSidebarItems[activeSection];
     if (activeSection === "documents") {
-      if (storedSelection && storedSelection.startsWith("documents-folder-")) {
+      if (storedSelection && findDocumentItem(documentsSidebarItems, storedSelection)) {
         return storedSelection;
       }
 
-      return documentsSidebarFolders[0]?.id ?? "";
+      return documentsSidebarItems[0]?.id ?? "";
     }
 
     return storedSelection ?? activeSidebarGroups[0]?.items[0]?.id ?? "";
   })();
 
-  const selectedDocumentFolderLabel = findDocumentFolderLabel(
-    documentsSidebarFolders,
-    selectedSidebarItemId
-  );
+  const selectedDocumentItem = selectedSidebarItemId
+    ? findDocumentItem(documentsSidebarItems, selectedSidebarItemId)
+    : undefined;
+  const selectedDocumentFolderLabel = selectedDocumentItem?.label;
+
+  const createDocumentItem = (kind: "note" | "folder", parentFolderId?: string) => {
+    const nextId = createDocumentItemId(kind);
+
+    setDocumentsSidebarItems((currentItems) => {
+      const resolvedParentFolderId =
+        typeof parentFolderId === "string"
+          ? parentFolderId
+          : (() => {
+              const selectedItem = selectedSidebarItemId
+                ? findDocumentItem(currentItems, selectedSidebarItemId)
+                : undefined;
+
+              if (!selectedItem) {
+                return null;
+              }
+
+              if (isDocumentFolder(selectedItem)) {
+                return selectedItem.id;
+              }
+
+              return findDocumentParentFolderId(currentItems, selectedItem.id);
+            })();
+
+      const nextNumber = countDocumentItemsByKind(currentItems, kind) + 1;
+      const nextItem: DocumentTreeItem =
+        kind === "folder"
+          ? { id: nextId, label: `New folder ${nextNumber}`, kind: "folder", children: [] }
+          : { id: nextId, label: `New note ${nextNumber}`, kind: "note" };
+
+      return appendDocumentItem(currentItems, resolvedParentFolderId, nextItem);
+    });
+
+    setSelectedSidebarItems((current) => ({
+      ...current,
+      documents: nextId
+    }));
+    setActiveSection("documents");
+  };
+
+  const handleCreateDocumentNote = (parentFolderId?: string) => createDocumentItem("note", parentFolderId);
+  const handleCreateDocumentFolder = (parentFolderId?: string) =>
+    createDocumentItem("folder", parentFolderId);
+
+  const handleOpenDocumentInNewTab = (itemId: string) => {
+    const item = findDocumentItem(documentsSidebarItems, itemId);
+    if (!item || isDocumentFolder(item)) {
+      return;
+    }
+
+    const nextTab: WorkspaceTabState = {
+      id: `tab-document-${itemId}-${Date.now()}`,
+      title: item.label,
+      kind: "document",
+      documentItemId: item.id,
+      closable: true
+    };
+
+    setTabs((currentTabs) => [...currentTabs, nextTab]);
+    setActiveTabId(nextTab.id);
+    setActiveSection("documents");
+    setSelectedSidebarItems((current) => ({
+      ...current,
+      documents: item.id
+    }));
+  };
+
+  const handleDuplicateDocumentItem = (itemId: string) => {
+    const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
+    if (!sourceItem) {
+      return;
+    }
+
+    const parentFolderId = findDocumentParentFolderId(documentsSidebarItems, itemId);
+    const duplicateItem = cloneDocumentItem(sourceItem);
+    duplicateItem.label = `${sourceItem.label} copy`;
+
+    setDocumentsSidebarItems((currentItems) => appendDocumentItem(currentItems, parentFolderId, duplicateItem));
+    setSelectedSidebarItems((current) => ({
+      ...current,
+      documents: duplicateItem.id
+    }));
+    setActiveSection("documents");
+  };
+
+  const handleCopyDocumentPath = (itemId: string) => {
+    const pathSegments = findDocumentLabelPath(documentsSidebarItems, itemId);
+    if (!pathSegments?.length) {
+      return;
+    }
+
+    const path = pathSegments.join("/");
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(path).catch(() => {
+        // Ignore clipboard failures in constrained runtimes.
+      });
+    }
+  };
+
+  const handleRenameDocumentItem = (itemId: string) => {
+    const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
+    if (!sourceItem) {
+      return;
+    }
+
+    const nextLabel = window.prompt("Rename", sourceItem.label)?.trim();
+    if (!nextLabel || nextLabel === sourceItem.label) {
+      return;
+    }
+
+    setDocumentsSidebarItems((currentItems) => updateDocumentLabel(currentItems, itemId, nextLabel));
+  };
+
+  const executeDeleteDocumentItem = (itemId: string) => {
+    const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
+    if (!sourceItem) {
+      return;
+    }
+
+    const result = removeDocumentItem(documentsSidebarItems, itemId);
+    if (!result.removedIds.length) {
+      return;
+    }
+
+    setDocumentsSidebarItems(result.items);
+
+    const removedIdSet = new Set(result.removedIds);
+    setSelectedSidebarItems((current) =>
+      removedIdSet.has(current.documents)
+        ? {
+            ...current,
+            documents: ""
+          }
+        : current
+    );
+
+    setTabs((currentTabs) => {
+      const nextTabs = currentTabs.filter(
+        (tab) => !(tab.kind === "document" && tab.documentItemId && removedIdSet.has(tab.documentItemId))
+      );
+
+      if (nextTabs.length === currentTabs.length) {
+        return currentTabs;
+      }
+
+      if (!nextTabs.length) {
+        const homeTab = createSectionTab("home");
+        setActiveSection("home");
+        setActiveTabId(homeTab.id);
+        return [homeTab];
+      }
+
+      const activeRemoved = currentTabs.some(
+        (tab) =>
+          tab.id === activeTabId &&
+          tab.kind === "document" &&
+          tab.documentItemId &&
+          removedIdSet.has(tab.documentItemId)
+      );
+
+      if (activeRemoved) {
+        const fallbackTab =
+          nextTabs.find((tab) => tab.kind === "section" && tab.sectionId === "documents") ?? nextTabs[0];
+
+        setActiveTabId(fallbackTab.id);
+
+        if (fallbackTab.kind === "section" && fallbackTab.sectionId) {
+          setActiveSection(fallbackTab.sectionId);
+        } else if (fallbackTab.kind === "document" && fallbackTab.documentItemId) {
+          setActiveSection("documents");
+          setSelectedSidebarItems((current) => ({
+            ...current,
+            documents: fallbackTab.documentItemId ?? current.documents
+          }));
+        }
+      }
+
+      return nextTabs;
+    });
+  };
+
+  const handleDeleteDocumentItem = (itemId: string) => {
+    const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
+    if (!sourceItem) {
+      return;
+    }
+
+    setPendingDelete({
+      itemId,
+      label: sourceItem.label,
+      kind: isDocumentFolder(sourceItem) ? "folder" : "note"
+    });
+  };
+
+  const handleConfirmDeleteDocumentItem = () => {
+    if (!pendingDelete) {
+      return;
+    }
+
+    executeDeleteDocumentItem(pendingDelete.itemId);
+    setPendingDelete(null);
+  };
+
+  useEffect(() => {
+    if (!pendingDelete) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPendingDelete(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pendingDelete]);
+
+  useEffect(() => {
+    setTabs((currentTabs) => {
+      let changed = false;
+
+      const nextTabs = currentTabs.map((tab) => {
+        if (tab.kind !== "document" || !tab.documentItemId) {
+          return tab;
+        }
+
+        const currentItem = findDocumentItem(documentsSidebarItems, tab.documentItemId);
+        if (!currentItem || currentItem.label === tab.title) {
+          return tab;
+        }
+
+        changed = true;
+        return {
+          ...tab,
+          title: currentItem.label
+        };
+      });
+
+      return changed ? nextTabs : currentTabs;
+    });
+  }, [documentsSidebarItems]);
 
   const activeTab =
     tabs.find((tab) => tab.id === activeTabId) ??
     tabs[0] ??
     createSectionTab(activeSection);
   const contentSection =
-    activeTab.kind === "section" ? activeTab.sectionId ?? activeSection : activeSection;
+    activeTab.kind === "section"
+      ? activeTab.sectionId ?? activeSection
+      : activeTab.kind === "document"
+        ? "documents"
+        : activeSection;
+
+  const handleStartCodexSession = useCallback(() => {
+    void (async () => {
+      if (codexSession.status === "running" || codexSession.status === "starting") {
+        return;
+      }
+
+      const commandPath = codexCommandPath.trim() || "codex";
+
+      setBottomPanelOpen(true);
+      setActiveBottomViewId("terminal");
+      setCodexSession((current) => ({
+        ...current,
+        status: "starting",
+        message: "Starting Codex process...",
+        lastExitCode: null
+      }));
+
+      if (!isTauriRuntime()) {
+        setCodexSession((current) => ({
+          ...current,
+          status: "error",
+          message: "Tauri runtime unavailable (web dev mode)."
+        }));
+        appendTerminalEntry({
+          sessionId: "local-preview",
+          stream: "system",
+          chunk: "\n[system] Tauri runtime unavailable, cannot spawn Codex here.\n"
+        });
+        return;
+      }
+
+      try {
+        const response = await invoke<SpawnCodexProcessResponse>("spawn_codex_process", {
+          request: {
+            workspace_path: workspace.rootPath,
+            command: commandPath,
+            args: ["--no-alt-screen"]
+          }
+        });
+
+        setCodexSession({
+          sessionId: response.session_id,
+          status: "running",
+          message: response.message,
+          lastExitCode: null
+        });
+      } catch (error) {
+        const message = `Failed to start Codex: ${String(error)}`;
+        setCodexSession((current) => ({
+          ...current,
+          status: "error",
+          message
+        }));
+
+        appendTerminalEntry({
+          sessionId: codexSession.sessionId ?? "unknown",
+          stream: "system",
+          chunk: `\n[system] ${message}\n`
+        });
+      }
+    })();
+  }, [appendTerminalEntry, codexCommandPath, codexSession.sessionId, codexSession.status, workspace.rootPath]);
+
+  const handleStopCodexSession = useCallback(() => {
+    void (async () => {
+      if (!codexSession.sessionId) {
+        return;
+      }
+
+      setCodexSession((current) => ({
+        ...current,
+        status: "stopping",
+        message: "Stopping Codex process..."
+      }));
+
+      try {
+        const response = await invoke<OperationAck>("stop_codex_process", {
+          request: {
+            session_id: codexSession.sessionId
+          }
+        });
+
+        appendTerminalEntry({
+          sessionId: codexSession.sessionId,
+          stream: "system",
+          chunk: `\n[system] ${response.message}\n`
+        });
+      } catch (error) {
+        const message = `Failed to stop Codex: ${String(error)}`;
+        setCodexSession((current) => ({
+          ...current,
+          status: "error",
+          message
+        }));
+
+        appendTerminalEntry({
+          sessionId: codexSession.sessionId,
+          stream: "system",
+          chunk: `\n[system] ${message}\n`
+        });
+      }
+    })();
+  }, [appendTerminalEntry, codexSession.sessionId]);
+
+  const handleSendCodexInput = useCallback(
+    (input: string) => {
+      void (async () => {
+        if (!codexSession.sessionId || codexSession.status !== "running") {
+          return;
+        }
+
+        try {
+          await invoke<OperationAck>("send_codex_input", {
+            request: {
+              session_id: codexSession.sessionId,
+              input
+            }
+          });
+        } catch (error) {
+          appendTerminalEntry({
+            sessionId: codexSession.sessionId,
+            stream: "system",
+            chunk: `\n[system] Failed to send input: ${String(error)}\n`
+          });
+        }
+      })();
+    },
+    [appendTerminalEntry, codexSession.sessionId, codexSession.status]
+  );
+
+
+  const handleResizeCodexTerminal = useCallback(
+    (cols: number, rows: number) => {
+      void (async () => {
+        if (!codexSession.sessionId || codexSession.status !== "running") {
+          return;
+        }
+
+        try {
+          await invoke<OperationAck>("resize_codex_terminal", {
+            request: {
+              session_id: codexSession.sessionId,
+              cols,
+              rows
+            }
+          });
+        } catch {
+          // Resize events are frequent and best-effort only.
+        }
+      })();
+    },
+    [codexSession.sessionId, codexSession.status]
+  );
+  const handleClearTerminal = useCallback(() => {
+    setCodexTerminalEntries([]);
+  }, []);
+
+  useEffect(() => {
+    if (contentSection === "codex" && codexSession.sessionId) {
+      setActiveBottomViewId("terminal");
+    }
+  }, [codexSession.sessionId, contentSection]);
 
   const inspectorSections = useMemo<InspectorSection[]>(() => {
     const latestRun = sortedRuns[0];
@@ -606,21 +1315,21 @@ function App() {
           title: "Session metadata",
           rows: [
             { label: "Workspace", value: workspace.rootPath },
-            { label: "Last command", value: "codex --workspace ." },
+            { label: "Session", value: codexSession.sessionId ?? "None" },
+            { label: "Status", value: codexSession.status },
             { label: "Output mode", value: "Bottom panel terminal stream" }
           ]
         },
         {
           id: "codex-next",
-          title: "Next steps",
+          title: "Bridge state",
           rows: [
-            { label: "Process bridge", value: "UI scaffold ready", tone: "neutral" },
-            { label: "Streaming", value: "Pending native wiring", tone: "warning" }
+            { label: "Entries", value: String(codexTerminalEntries.length) },
+            { label: "Last exit", value: codexSession.lastExitCode === null ? "N/A" : String(codexSession.lastExitCode) }
           ]
         }
       ];
     }
-
     if (contentSection === "settings") {
       return [
         {
@@ -652,7 +1361,7 @@ function App() {
   }, [contentSection, runStats, selectedDocumentFolderLabel, selectedSidebarItemId, sortedRuns, theme, workspace]);
 
   const bottomPanelViews = useMemo<BottomPanelView[]>(() => {
-    return [
+    const views: BottomPanelView[] = [
       {
         id: "status",
         label: "Status",
@@ -678,12 +1387,47 @@ function App() {
         label: "Codex output",
         lines: [
           "$ codex --workspace .",
-          "Starting session scaffold...",
-          "Terminal stream will connect to native process bridge in a later task."
+          "Interactive stream is now available in the Terminal tab on the Codex screen.",
+          `Session status: ${codexSession.status}`
         ]
       }
     ];
-  }, [bottomPanelHeight, bottomPanelOpen, contentSection, inspectorOpen, inspectorWidth, sidebarCollapsed, sidebarWidth]);
+
+    if (contentSection === "codex") {
+      views.push({
+        id: "terminal",
+        label: "Terminal",
+        content: (
+          <CodexTerminalPanel
+            session={codexSession}
+            entries={codexTerminalEntries}
+            onStart={handleStartCodexSession}
+            onStop={handleStopCodexSession}
+            onClear={handleClearTerminal}
+            onSendInput={handleSendCodexInput}
+            onResizeTerminal={handleResizeCodexTerminal}
+          />
+        )
+      });
+    }
+
+    return views;
+  }, [
+    bottomPanelHeight,
+    bottomPanelOpen,
+    codexSession,
+    codexTerminalEntries,
+    contentSection,
+    handleClearTerminal,
+    handleSendCodexInput,
+    handleResizeCodexTerminal,
+    handleStartCodexSession,
+    handleStopCodexSession,
+    inspectorOpen,
+    inspectorWidth,
+    sidebarCollapsed,
+    sidebarWidth
+  ]);
 
   useEffect(() => {
     if (!bottomPanelViews.some((view) => view.id === activeBottomViewId)) {
@@ -764,6 +1508,12 @@ function App() {
         setActiveTabId(fallbackTab.id);
         if (fallbackTab.kind === "section" && fallbackTab.sectionId) {
           setActiveSection(fallbackTab.sectionId);
+        } else if (fallbackTab.kind === "document" && fallbackTab.documentItemId) {
+          setActiveSection("documents");
+          setSelectedSidebarItems((current) => ({
+            ...current,
+            documents: fallbackTab.documentItemId ?? current.documents
+          }));
         }
       }
 
@@ -780,6 +1530,15 @@ function App() {
     setActiveTabId(tabId);
     if (tab.kind === "section" && tab.sectionId) {
       setActiveSection(tab.sectionId);
+      return;
+    }
+
+    if (tab.kind === "document" && tab.documentItemId) {
+      setActiveSection("documents");
+      setSelectedSidebarItems((current) => ({
+        ...current,
+        documents: tab.documentItemId ?? current.documents
+      }));
     }
   };
 
@@ -884,7 +1643,14 @@ function App() {
       return <CodexScreen workspace={workspace} />;
     }
 
-    return <SettingsScreen workspace={workspace} selectedCategory={settingsCategory} />;
+    return (
+      <SettingsScreen
+        workspace={workspace}
+        selectedCategory={settingsCategory}
+        codexCommandPath={codexCommandPath}
+        onCodexCommandPathChange={setCodexCommandPath}
+      />
+    );
   };
 
   const renderWorkspaceContent = () => {
@@ -912,7 +1678,8 @@ function App() {
   };
 
   return (
-    <AppShell
+    <>
+      <AppShell
       sidebarCollapsed={sidebarCollapsed}
       sidebarWidth={sidebarWidth}
       inspectorOpen={inspectorOpen}
@@ -951,7 +1718,7 @@ function App() {
         activeSection === "documents" ? (
           <DocumentsSidebar
             collapsed={sidebarCollapsed}
-            folders={documentsSidebarFolders}
+            folders={documentsSidebarItems}
             selectedItemId={selectedSidebarItemId}
             onSelectItem={(itemId) =>
               setSelectedSidebarItems((current) => ({
@@ -959,6 +1726,13 @@ function App() {
                 [activeSection]: itemId
               }))
             }
+            onCreateNote={handleCreateDocumentNote}
+            onCreateFolder={handleCreateDocumentFolder}
+            onOpenInNewTab={handleOpenDocumentInNewTab}
+            onDuplicateItem={handleDuplicateDocumentItem}
+            onCopyPath={handleCopyDocumentPath}
+            onRenameItem={handleRenameDocumentItem}
+            onDeleteItem={handleDeleteDocumentItem}
           />
         ) : (
           <CollapsibleSidebar
@@ -1003,10 +1777,64 @@ function App() {
         </span>
       </footer>
     </AppShell>
+
+    {pendingDelete ? (
+      <ConfirmDialog
+        title={`Delete ${pendingDelete.kind}`}
+        message={`Are you sure you want to delete "${pendingDelete.label}"?`}
+        description={
+          pendingDelete.kind === "folder"
+            ? "This folder and all nested items will be removed."
+            : "This note will be removed."
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        danger
+        onConfirm={handleConfirmDeleteDocumentItem}
+        onCancel={() => setPendingDelete(null)}
+      />
+    ) : null}
+    </>
   );
 }
 
 export default App;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
