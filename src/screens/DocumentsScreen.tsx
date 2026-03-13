@@ -1,11 +1,10 @@
-import { PaneHeader } from "../components/shell/PaneHeader";
-import { useLocalStorageState } from "../hooks/useLocalStorageState";
-import MDEditor from "@uiw/react-md-editor";
+import { useEffect } from "react";
+import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import "@uiw/react-md-editor/markdown-editor.css";
-import "@uiw/react-markdown-preview/markdown.css";
+import { MilkdownEditor } from "../components/shell/MilkdownEditor";
+import { PanelLeftIcon, PanelRightIcon } from "../components/shell/icons";
+import { useLocalStorageState } from "../hooks/useLocalStorageState";
 
-type DocumentPreviewMode = "live" | "edit" | "preview";
 type ThemeMode = "dark" | "light";
 
 interface DocumentsScreenProps {
@@ -42,54 +41,52 @@ codex --workspace .
 \`\`\`
 `;
 
-const previewModeOptions: Array<{ id: DocumentPreviewMode; label: string }> = [
-  { id: "live", label: "Live" },
-  { id: "edit", label: "Edit" },
-  { id: "preview", label: "Preview" }
-];
-
 export function DocumentsScreen({ theme }: DocumentsScreenProps) {
   const [markdown, setMarkdown] = useLocalStorageState<string>("documents.markdown", defaultDocument);
-  const [previewMode, setPreviewMode] = useLocalStorageState<DocumentPreviewMode>(
-    "documents.previewMode",
-    "live"
+  const [previewCollapsed, setPreviewCollapsed] = useLocalStorageState<boolean>(
+    "documents.previewCollapsed",
+    false
+  );
+
+  useEffect(() => {
+    window.localStorage.removeItem("documents.previewMode");
+    window.localStorage.removeItem("documents.editorCollapsed");
+  }, []);
+
+  const togglePreviewButton = (
+    <button
+      type="button"
+      className="documents-pane-toggle"
+      onClick={() => setPreviewCollapsed((current) => !current)}
+      aria-pressed={previewCollapsed}
+      title={previewCollapsed ? "Show preview panel" : "Hide preview panel"}
+    >
+      <span className="documents-pane-toggle-icon" aria-hidden="true">
+        {previewCollapsed ? <PanelRightIcon /> : <PanelLeftIcon />}
+      </span>
+      <span>{previewCollapsed ? "Show Preview" : "Hide Preview"}</span>
+    </button>
   );
 
   return (
     <section className="workspace-screen documents-screen">
-      <PaneHeader
-        eyebrow="Documents"
-        title="Markdown Workspace"
-        subtitle="Write and review markdown with editor + rendered preview inside the main workspace pane."
-        actions={
-          <div className="documents-mode-toggle" role="group" aria-label="Markdown view mode">
-            {previewModeOptions.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={`documents-mode-button${previewMode === option.id ? " active" : ""}`}
-                onClick={() => setPreviewMode(option.id)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        }
-      />
+      <div className="documents-toolbar">{togglePreviewButton}</div>
 
-      <article className="pane-block documents-pane" data-color-mode={theme === "dark" ? "dark" : "light"}>
-        <MDEditor
-          style={{ height: "100%" }}
-          value={markdown}
-          onChange={(value) => setMarkdown(value ?? "")}
-          preview={previewMode}
-          visibleDragbar={false}
-          previewOptions={{ remarkPlugins: [remarkGfm] }}
-          textareaProps={{
-            placeholder: "Write markdown here...",
-            "aria-label": "Markdown document"
-          }}
-        />
+      <article
+        className={`pane-block documents-pane documents-split-pane${previewCollapsed ? " preview-collapsed" : ""}`}
+        data-theme-mode={theme}
+      >
+        <div className="documents-editor-pane">
+          <MilkdownEditor value={markdown} onChange={setMarkdown} className="documents-editor-root" />
+        </div>
+
+        <aside className="documents-preview-pane" aria-label="Markdown preview" aria-hidden={previewCollapsed}>
+          <div className="documents-preview-scroll">
+            <div className="documents-preview-content">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+            </div>
+          </div>
+        </aside>
       </article>
     </section>
   );

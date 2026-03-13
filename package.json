@@ -10,10 +10,13 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@milkdown/crepe": "^7.19.0",
+    "@milkdown/plugin-listener": "^7.19.0",
+    "@milkdown/react": "^7.19.0",
     "@tauri-apps/api": "^2.0.0",
-    "@uiw/react-md-editor": "^4.0.11",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {

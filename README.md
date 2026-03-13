@@ -48,6 +48,7 @@ All screens now render inside the same pane-based shell architecture with compac
 
 - The permanent icon rail includes `Documents` between `Vault` and `Runs`.
 - Documents opens a dedicated markdown workspace page in the main pane.
-- The editor is dependency-backed (`@uiw/react-md-editor`) for production-ready editing UX with built-in toolbar and rendered preview.
+- The editor is dependency-backed (`@milkdown/crepe` + `@milkdown/react`) with a fixed split layout: Milkdown editing on the left and rendered preview on the right.
 - Markdown support includes headings, emphasis, links, lists, checklists, blockquotes, code blocks, and tables (via GFM preview plugin).
-- Editor content and view mode are persisted in local storage for continuity across sessions.
+- Editor content is persisted in local storage (`documents.markdown`) for continuity across sessions.
+
