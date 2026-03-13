@@ -1,13 +1,27 @@
-﻿export interface BottomPanelView {
+import type { ReactNode } from "react";
+
+export interface BottomPanelTextView {
   id: string;
   label: string;
   lines: string[];
 }
 
+export interface BottomPanelCustomView {
+  id: string;
+  label: string;
+  content: ReactNode;
+}
+
+export type BottomPanelView = BottomPanelTextView | BottomPanelCustomView;
+
 interface BottomPanelProps {
   views: BottomPanelView[];
   activeViewId: string;
   onSelectView: (viewId: string) => void;
+}
+
+function isTextView(view: BottomPanelView): view is BottomPanelTextView {
+  return "lines" in view;
 }
 
 export function BottomPanel({ views, activeViewId, onSelectView }: BottomPanelProps) {
@@ -30,8 +44,11 @@ export function BottomPanel({ views, activeViewId, onSelectView }: BottomPanelPr
         ))}
       </div>
 
-      <pre className="bottom-panel-output">{activeView.lines.join("\n")}</pre>
+      {isTextView(activeView) ? (
+        <pre className="bottom-panel-output">{activeView.lines.join("\n")}</pre>
+      ) : (
+        <div className="bottom-panel-custom">{activeView.content}</div>
+      )}
     </div>
   );
 }
-

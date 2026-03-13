@@ -73,7 +73,7 @@ export function DocumentsScreen({ theme }: DocumentsScreenProps) {
       <div className="documents-toolbar">{togglePreviewButton}</div>
 
       <article
-        className={`pane-block documents-pane documents-split-pane${previewCollapsed ? " preview-collapsed" : ""}`}
+        className={`documents-pane documents-split-pane${previewCollapsed ? " preview-collapsed" : ""}`}
         data-theme-mode={theme}
       >
         <div className="documents-editor-pane">

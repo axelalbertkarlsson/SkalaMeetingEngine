@@ -3,7 +3,7 @@ import { editorViewCtx } from "@milkdown/core";
 import { Crepe } from "@milkdown/crepe";
 import "@milkdown/crepe/theme/common/style.css";
 import { Fragment, type Node as ProseMirrorNode } from "@milkdown/prose/model";
-import { NodeSelection } from "@milkdown/prose/state";
+import { NodeSelection, TextSelection } from "@milkdown/prose/state";
 import type { EditorView } from "@milkdown/prose/view";
 import { listener, listenerCtx } from "@milkdown/plugin-listener";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
@@ -28,60 +28,134 @@ function posAtChildIndex(doc: ProseMirrorNode, index: number): number {
   return pos;
 }
 
+function getSelectedBlockRange(state: EditorView["state"]): { start: number; end: number } {
+  const { doc, selection } = state;
+  const maxIndex = Math.max(0, doc.childCount - 1);
+
+  if (selection.empty || selection instanceof NodeSelection) {
+    const index = Math.min(Math.max(selection.$from.index(0), 0), maxIndex);
+    return { start: index, end: index };
+  }
+
+  let start = Math.min(selection.$from.index(0), selection.$to.index(0));
+  let end = Math.max(selection.$from.index(0), selection.$to.index(0));
+
+  if (selection.from < selection.to && selection.$to.parentOffset === 0 && end > start) {
+    end -= 1;
+  }
+
+  start = Math.min(Math.max(start, 0), maxIndex);
+  end = Math.min(Math.max(end, start), maxIndex);
+
+  return { start, end };
+}
+
 function moveSelectedBlock(view: EditorView, direction: "up" | "down"): boolean {
   const { state } = view;
-  const { doc, selection } = state;
+  const { doc } = state;
 
   if (doc.childCount < 2) {
     return false;
   }
 
-  const currentIndex = selection.$from.index(0);
-  const targetIndex = direction === "down" ? currentIndex + 1 : currentIndex - 1;
+  const range = getSelectedBlockRange(state);
+  const selectedSize = range.end - range.start + 1;
 
-  if (currentIndex < 0 || currentIndex >= doc.childCount || targetIndex < 0 || targetIndex >= doc.childCount) {
+  if (direction === "up" && range.start <= 0) {
     return false;
   }
 
-  const firstIndex = Math.min(currentIndex, targetIndex);
-  const secondIndex = firstIndex + 1;
+  if (direction === "down" && range.end >= doc.childCount - 1) {
+    return false;
+  }
 
-  const firstNode = doc.child(firstIndex);
-  const secondNode = doc.child(secondIndex);
+  const selectedNodes: ProseMirrorNode[] = [];
+  for (let i = range.start; i <= range.end; i += 1) {
+    selectedNodes.push(doc.child(i));
+  }
 
-  const replaceFrom = posAtChildIndex(doc, firstIndex);
-  const replaceTo = replaceFrom + firstNode.nodeSize + secondNode.nodeSize;
+  let replaceFrom = 0;
+  let replaceTo = 0;
+  let replacementNodes: ProseMirrorNode[] = [];
+  let movedStartIndex = range.start;
 
-  let tr = state.tr.replaceWith(replaceFrom, replaceTo, Fragment.fromArray([secondNode, firstNode]));
+  if (direction === "down") {
+    const adjacent = doc.child(range.end + 1);
+    replaceFrom = posAtChildIndex(doc, range.start);
+    replaceTo = posAtChildIndex(doc, range.end + 2);
+    replacementNodes = [adjacent, ...selectedNodes];
+    movedStartIndex = range.start + 1;
+  } else {
+    const adjacent = doc.child(range.start - 1);
+    replaceFrom = posAtChildIndex(doc, range.start - 1);
+    replaceTo = posAtChildIndex(doc, range.end + 1);
+    replacementNodes = [...selectedNodes, adjacent];
+    movedStartIndex = range.start - 1;
+  }
 
-  const movedIndex = direction === "down" ? currentIndex + 1 : currentIndex - 1;
-  const movedPos = posAtChildIndex(tr.doc, movedIndex);
-  tr = tr.setSelection(NodeSelection.create(tr.doc, movedPos));
+  let tr = state.tr.replaceWith(replaceFrom, replaceTo, Fragment.fromArray(replacementNodes));
+
+  const movedStartPos = posAtChildIndex(tr.doc, movedStartIndex);
+  if (selectedSize === 1) {
+    tr = tr.setSelection(NodeSelection.create(tr.doc, movedStartPos));
+  } else {
+    const movedEndPos = posAtChildIndex(tr.doc, movedStartIndex + selectedSize);
+    const from = Math.min(movedStartPos + 1, tr.doc.content.size);
+    const to = Math.max(from, movedEndPos - 1);
+
+    try {
+      tr = tr.setSelection(TextSelection.create(tr.doc, from, to));
+    } catch {
+      tr = tr.setSelection(NodeSelection.create(tr.doc, movedStartPos));
+    }
+  }
 
   view.dispatch(tr.scrollIntoView());
   view.focus();
   return true;
 }
 
-function syncSelectionToHandle(view: EditorView, handleElement: HTMLElement) {
+function getHandleBlockIndex(view: EditorView, handleElement: HTMLElement): number | null {
   const editorRect = view.dom.getBoundingClientRect();
   const handleRect = handleElement.getBoundingClientRect();
 
-  const probeX = Math.min(editorRect.left + 24, editorRect.right - 1);
   const probeY = Math.min(Math.max(handleRect.top + handleRect.height / 2, editorRect.top + 1), editorRect.bottom - 1);
 
-  const resolved = view.posAtCoords({
-    left: probeX,
-    top: probeY
-  });
-
-  if (!resolved || resolved.inside == null || resolved.inside < 0) {
-    return;
-  }
+  const probeXs = [
+    editorRect.left + 24,
+    editorRect.left + 72,
+    editorRect.left + 128,
+    editorRect.left + 192,
+    editorRect.left + Math.min(256, Math.max(32, editorRect.width - 16)),
+    editorRect.left + editorRect.width * 0.5
+  ];
 
   const currentDoc = view.state.doc;
-  const $pos = currentDoc.resolve(resolved.inside);
-  const blockIndex = Math.min($pos.index(0), currentDoc.childCount - 1);
+
+  for (const x of probeXs) {
+    const probeX = Math.min(Math.max(x, editorRect.left + 1), editorRect.right - 1);
+    const resolved = view.posAtCoords({
+      left: probeX,
+      top: probeY
+    });
+
+    if (!resolved || resolved.inside == null || resolved.inside < 0) {
+      continue;
+    }
+
+    const $pos = currentDoc.resolve(resolved.inside);
+    return Math.min($pos.index(0), currentDoc.childCount - 1);
+  }
+
+  if (currentDoc.childCount > 0) {
+    return Math.min(view.state.selection.$from.index(0), currentDoc.childCount - 1);
+  }
+
+  return null;
+}
+
+function selectBlockByIndex(view: EditorView, blockIndex: number) {
+  const currentDoc = view.state.doc;
   const blockPos = posAtChildIndex(currentDoc, blockIndex);
 
   const tr = view.state.tr.setSelection(NodeSelection.create(currentDoc, blockPos));
@@ -184,29 +258,64 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
       return crepe.editor.ctx.get(editorViewCtx);
     };
 
-    let activePointerId: number | null = null;
+    let dragging = false;
     let activeDragItem: HTMLElement | null = null;
+    let dragShield: HTMLDivElement | null = null;
     let lastPointerY = 0;
     let pendingDeltaY = 0;
-    const stepThreshold = 28;
+    const stepThreshold = 24;
+
+    const removeDragShield = () => {
+      if (dragShield && dragShield.parentElement) {
+        dragShield.parentElement.removeChild(dragShield);
+      }
+      dragShield = null;
+    };
+
+    const ensureDragShield = () => {
+      if (dragShield) {
+        return;
+      }
+
+      const shield = document.createElement("div");
+      shield.setAttribute("aria-hidden", "true");
+      Object.assign(shield.style, {
+        position: "fixed",
+        inset: "0",
+        zIndex: "2147483647",
+        cursor: "grabbing",
+        background: "transparent"
+      });
+
+      document.body.appendChild(shield);
+      dragShield = shield;
+    };
 
     const clearActiveDragState = () => {
+      dragging = false;
+      pendingDeltaY = 0;
+
       if (activeDragItem) {
         activeDragItem.classList.remove("active");
       }
+
       activeDragItem = null;
-      activePointerId = null;
-      pendingDeltaY = 0;
+      document.body.style.userSelect = "";
+      removeDragShield();
     };
 
-    const onPointerDown = (event: PointerEvent) => {
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
+
       const target = event.target;
-      if (!(target instanceof HTMLElement)) {
+      if (!(target instanceof Element)) {
         return;
       }
 
       const dragItem = target.closest(".milkdown-block-handle .operation-item:last-child");
-      if (!(dragItem instanceof HTMLElement) || !container.contains(dragItem)) {
+      if (!(dragItem instanceof HTMLElement) || !container.contains(dragItem as Node)) {
         return;
       }
 
@@ -215,22 +324,35 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
         return;
       }
 
-      syncSelectionToHandle(view, dragItem);
+      const handleBlockIndex = getHandleBlockIndex(view, dragItem);
+      if (handleBlockIndex == null) {
+        return;
+      }
 
-      activePointerId = event.pointerId;
+      const selectedRange = getSelectedBlockRange(view.state);
+      const selectionSpansMultipleBlocks = !view.state.selection.empty && selectedRange.end > selectedRange.start;
+      const handleInsideSelection =
+        handleBlockIndex >= selectedRange.start && handleBlockIndex <= selectedRange.end;
+
+      if (!(selectionSpansMultipleBlocks && handleInsideSelection)) {
+        selectBlockByIndex(view, handleBlockIndex);
+      }
+
+      dragging = true;
       activeDragItem = dragItem;
       lastPointerY = event.clientY;
       pendingDeltaY = 0;
 
       dragItem.classList.add("active");
-      dragItem.setPointerCapture(event.pointerId);
+      document.body.style.userSelect = "none";
+      ensureDragShield();
 
       event.preventDefault();
       event.stopPropagation();
     };
 
-    const onPointerMove = (event: PointerEvent) => {
-      if (activePointerId == null || event.pointerId !== activePointerId) {
+    const onMouseMove = (event: MouseEvent) => {
+      if (!dragging) {
         return;
       }
 
@@ -264,33 +386,33 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
       event.preventDefault();
     };
 
-    const onPointerUp = (event: PointerEvent) => {
-      if (activePointerId == null || event.pointerId !== activePointerId) {
+    const onMouseUp = () => {
+      if (!dragging) {
         return;
       }
 
       clearActiveDragState();
     };
 
-    const onPointerCancel = (event: PointerEvent) => {
-      if (activePointerId == null || event.pointerId !== activePointerId) {
+    const onWindowBlur = () => {
+      if (!dragging) {
         return;
       }
 
       clearActiveDragState();
     };
 
-    container.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("pointermove", onPointerMove, true);
-    window.addEventListener("pointerup", onPointerUp, true);
-    window.addEventListener("pointercancel", onPointerCancel, true);
+    container.addEventListener("mousedown", onMouseDown, true);
+    window.addEventListener("mousemove", onMouseMove, true);
+    window.addEventListener("mouseup", onMouseUp, true);
+    window.addEventListener("blur", onWindowBlur);
 
     return () => {
       clearActiveDragState();
-      container.removeEventListener("pointerdown", onPointerDown, true);
-      window.removeEventListener("pointermove", onPointerMove, true);
-      window.removeEventListener("pointerup", onPointerUp, true);
-      window.removeEventListener("pointercancel", onPointerCancel, true);
+      container.removeEventListener("mousedown", onMouseDown, true);
+      window.removeEventListener("mousemove", onMouseMove, true);
+      window.removeEventListener("mouseup", onMouseUp, true);
+      window.removeEventListener("blur", onWindowBlur);
     };
   }, []);
 
