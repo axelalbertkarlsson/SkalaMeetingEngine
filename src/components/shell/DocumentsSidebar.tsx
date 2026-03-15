@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -32,6 +32,7 @@ interface DocumentsSidebarProps {
   folders: DocumentTreeItem[];
   selectedItemId?: string;
   onSelectItem: (itemId: string) => void;
+  onOpenNote: (itemId: string) => void;
   onCreateNote: (parentFolderId?: string) => void;
   onCreateFolder: (parentFolderId?: string) => void;
   onOpenInNewTab: (itemId: string) => void;
@@ -39,6 +40,7 @@ interface DocumentsSidebarProps {
   onCopyPath: (itemId: string) => void;
   onRenameItem: (itemId: string) => void;
   onDeleteItem: (itemId: string) => void;
+  onMoveItem: (itemId: string, targetFolderId: string) => void;
 }
 
 interface ContextMenuState {
@@ -133,21 +135,88 @@ export function DocumentsSidebar({
   folders,
   selectedItemId,
   onSelectItem,
+  onOpenNote,
   onCreateNote,
   onCreateFolder,
   onOpenInNewTab,
   onDuplicateItem,
   onCopyPath,
   onRenameItem,
-  onDeleteItem
+  onDeleteItem,
+  onMoveItem
 }: DocumentsSidebarProps) {
   const [sortAscending, setSortAscending] = useState(true);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set(["documents-folder-pps"]));
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
+  const [dropTargetFolderId, setDropTargetFolderId] = useState<string | null>(null);
+
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const expandTimerRef = useRef<number | null>(null);
+  const expandTimerTargetRef = useRef<string | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const dragJustEndedRef = useRef(false);
 
   const expandableIds = useMemo(() => collectExpandableIds(folders), [folders]);
   const visibleTree = useMemo(() => sortTree(folders, sortAscending), [folders, sortAscending]);
+
+  const clearExpandTimer = () => {
+    if (expandTimerRef.current !== null) {
+      window.clearTimeout(expandTimerRef.current);
+      expandTimerRef.current = null;
+    }
+
+    expandTimerTargetRef.current = null;
+  };
+
+  const queueExpandFolder = (folderId: string) => {
+    if (expandedIds.has(folderId)) {
+      return;
+    }
+
+    if (expandTimerTargetRef.current === folderId) {
+      return;
+    }
+
+    clearExpandTimer();
+    expandTimerTargetRef.current = folderId;
+    expandTimerRef.current = window.setTimeout(() => {
+      setExpandedIds((current) => {
+        if (current.has(folderId)) {
+          return current;
+        }
+
+        const next = new Set(current);
+        next.add(folderId);
+        return next;
+      });
+
+      expandTimerRef.current = null;
+      expandTimerTargetRef.current = null;
+    }, 220);
+  };
+
+  const clearDragState = () => {
+    setDraggingItemId(null);
+    setDropTargetFolderId(null);
+    clearExpandTimer();
+  };
+
+  const resolveFolderDropTargetAtPoint = (clientX: number, clientY: number, sourceItemId: string) => {
+    const elementAtPoint = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    const rowElement = elementAtPoint?.closest<HTMLButtonElement>("[data-doc-tree-row='true']");
+
+    if (!rowElement) {
+      return null;
+    }
+
+    const targetFolderId = rowElement.dataset.docFolderId;
+    if (!targetFolderId || targetFolderId === sourceItemId) {
+      return null;
+    }
+
+    return targetFolderId;
+  };
 
   useEffect(() => {
     if (!selectedItemId) {
@@ -201,6 +270,14 @@ export function DocumentsSidebar({
     };
   }, [contextMenu]);
 
+  useEffect(() => {
+    return () => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+      clearExpandTimer();
+    };
+  }, []);
+
   const toggleExpanded = (itemId: string) => {
     setExpandedIds((current) => {
       const next = new Set(current);
@@ -249,21 +326,124 @@ export function DocumentsSidebar({
     return (
       <ul className="documents-tree-list" role={depth === 0 ? "tree" : "group"}>
         {items.map((item) => {
-          const hasChildren = isFolder(item) && Boolean(item.children?.length);
+          const isFolderItem = isFolder(item);
+          const hasChildren = isFolderItem && Boolean(item.children?.length);
           const isExpanded = hasChildren && expandedIds.has(item.id);
           const isActive = item.id === selectedItemId;
+          const isDropTarget = dropTargetFolderId === item.id;
+          const isDragging = draggingItemId === item.id;
+
+          const rowClassName = [
+            "documents-tree-row",
+            isActive ? "active" : "",
+            isDropTarget ? "drop-target" : "",
+            isDragging ? "dragging" : ""
+          ]
+            .filter(Boolean)
+            .join(" ");
+
+          const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+            if (event.button !== 0) {
+              return;
+            }
+
+            const sourceItemId = item.id;
+            const pointerId = event.pointerId;
+            const startX = event.clientX;
+            const startY = event.clientY;
+            let hasStartedDragging = false;
+            let hoveredFolderId: string | null = null;
+
+            dragCleanupRef.current?.();
+            dragCleanupRef.current = null;
+
+            const finishDrag = () => {
+              window.removeEventListener("pointermove", onWindowPointerMove);
+              window.removeEventListener("pointerup", onWindowPointerUp);
+              window.removeEventListener("pointercancel", onWindowPointerUp);
+              dragCleanupRef.current = null;
+              clearDragState();
+            };
+
+            const onWindowPointerMove = (moveEvent: PointerEvent) => {
+              if (moveEvent.pointerId !== pointerId) {
+                return;
+              }
+
+              const distance = Math.abs(moveEvent.clientX - startX) + Math.abs(moveEvent.clientY - startY);
+              if (!hasStartedDragging && distance < 5) {
+                return;
+              }
+
+              if (!hasStartedDragging) {
+                hasStartedDragging = true;
+                setDraggingItemId(sourceItemId);
+                setDropTargetFolderId(null);
+              }
+
+              moveEvent.preventDefault();
+
+              const nextFolderId = resolveFolderDropTargetAtPoint(
+                moveEvent.clientX,
+                moveEvent.clientY,
+                sourceItemId
+              );
+
+              hoveredFolderId = nextFolderId;
+              setDropTargetFolderId(nextFolderId);
+
+              if (nextFolderId) {
+                queueExpandFolder(nextFolderId);
+              } else {
+                clearExpandTimer();
+              }
+            };
+
+            const onWindowPointerUp = (upEvent: PointerEvent) => {
+              if (upEvent.pointerId !== pointerId) {
+                return;
+              }
+
+              if (hasStartedDragging) {
+                dragJustEndedRef.current = true;
+
+                if (hoveredFolderId && hoveredFolderId !== sourceItemId) {
+                  onMoveItem(sourceItemId, hoveredFolderId);
+                }
+              }
+
+              finishDrag();
+            };
+
+            window.addEventListener("pointermove", onWindowPointerMove, { passive: false });
+            window.addEventListener("pointerup", onWindowPointerUp);
+            window.addEventListener("pointercancel", onWindowPointerUp);
+            dragCleanupRef.current = finishDrag;
+          };
 
           return (
             <li key={item.id}>
               <button
                 type="button"
-                className={isActive ? "documents-tree-row active" : "documents-tree-row"}
+                className={rowClassName}
                 style={{ paddingInlineStart: `${8 + depth * 18}px` }}
+                data-doc-tree-row="true"
+                data-doc-item-id={item.id}
+                data-doc-folder-id={isFolderItem ? item.id : undefined}
+                onPointerDown={onPointerDown}
                 onClick={() => {
-                  onSelectItem(item.id);
-                  if (hasChildren) {
-                    toggleExpanded(item.id);
+                  if (dragJustEndedRef.current) {
+                    dragJustEndedRef.current = false;
+                    return;
                   }
+
+                  onSelectItem(item.id);
+                  if (isFolderItem) {
+                    toggleExpanded(item.id);
+                    return;
+                  }
+
+                  onOpenNote(item.id);
                 }}
                 onContextMenu={(event) => {
                   event.preventDefault();
@@ -375,4 +555,3 @@ export function DocumentsSidebar({
     </div>
   );
 }
-
