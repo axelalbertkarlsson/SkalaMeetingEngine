@@ -119,6 +119,34 @@ function isDocumentFolder(item: DocumentTreeItem) {
   return item.kind !== "note";
 }
 
+function isDocumentNote(item: DocumentTreeItem) {
+  return (item.kind ?? "folder") === "note";
+}
+
+function getDocumentMarkdownStorageKey(noteId: string) {
+  return `documents.markdown.${noteId}`;
+}
+
+function collectClonedNoteIdPairs(
+  source: DocumentTreeItem,
+  clone: DocumentTreeItem,
+  pairs: Array<[sourceId: string, clonedId: string]> = []
+) {
+  if (isDocumentNote(source)) {
+    pairs.push([source.id, clone.id]);
+  }
+
+  const sourceChildren = source.children ?? [];
+  const clonedChildren = clone.children ?? [];
+  const branchLength = Math.min(sourceChildren.length, clonedChildren.length);
+
+  for (let index = 0; index < branchLength; index += 1) {
+    collectClonedNoteIdPairs(sourceChildren[index], clonedChildren[index], pairs);
+  }
+
+  return pairs;
+}
+
 function findDocumentItem(items: DocumentTreeItem[], itemId: string): DocumentTreeItem | undefined {
   for (const item of items) {
     if (item.id === itemId) {
@@ -258,6 +286,51 @@ function removeDocumentItem(
   };
 }
 
+function documentTreeContainsId(item: DocumentTreeItem, targetId: string): boolean {
+  if (item.id === targetId) {
+    return true;
+  }
+
+  if (!item.children?.length) {
+    return false;
+  }
+
+  return item.children.some((child) => documentTreeContainsId(child, targetId));
+}
+
+function detachDocumentItem(
+  items: DocumentTreeItem[],
+  itemId: string
+): { items: DocumentTreeItem[]; item: DocumentTreeItem | null } {
+  let detachedItem: DocumentTreeItem | null = null;
+
+  const nextItems = items.flatMap((item) => {
+    if (item.id === itemId) {
+      detachedItem = item;
+      return [];
+    }
+
+    if (item.children?.length) {
+      const nestedDetach = detachDocumentItem(item.children, itemId);
+      if (nestedDetach.item) {
+        detachedItem = nestedDetach.item;
+        return [
+          {
+            ...item,
+            children: nestedDetach.items
+          }
+        ];
+      }
+    }
+
+    return [item];
+  });
+
+  return {
+    items: nextItems,
+    item: detachedItem
+  };
+}
 function findDocumentLabelPath(
   items: DocumentTreeItem[],
   itemId: string,
@@ -416,6 +489,10 @@ function App() {
   );
   const [codexDisableAltScreen, setCodexDisableAltScreen] = useLocalStorageState<boolean>(
     "settings.codex.disableAltScreen",
+    true
+  );
+  const [documentsOpenInNewTab, setDocumentsOpenInNewTab] = useLocalStorageState<boolean>(
+    "settings.documents.openInNewTab",
     true
   );
   const sortedRuns = useMemo(() => sortRunsByStartedAt(runs), []);
@@ -818,6 +895,10 @@ function App() {
       return appendDocumentItem(currentItems, resolvedParentFolderId, nextItem);
     });
 
+    if (kind === "note" && typeof window !== "undefined") {
+      window.localStorage.setItem(getDocumentMarkdownStorageKey(nextId), JSON.stringify(""));
+    }
+
     setSelectedSidebarItems((current) => ({
       ...current,
       documents: nextId
@@ -829,14 +910,23 @@ function App() {
   const handleCreateDocumentFolder = (parentFolderId?: string) =>
     createDocumentItem("folder", parentFolderId);
 
-  const handleOpenDocumentInNewTab = (itemId: string) => {
-    const item = findDocumentItem(documentsSidebarItems, itemId);
-    if (!item || isDocumentFolder(item)) {
+  const openDocumentNoteInTab = (item: DocumentTreeItem) => {
+    const existingTab = tabs.find(
+      (tab) => tab.kind === "document" && tab.documentItemId === item.id
+    );
+
+    if (existingTab) {
+      setActiveTabId(existingTab.id);
+      setActiveSection("documents");
+      setSelectedSidebarItems((current) => ({
+        ...current,
+        documents: item.id
+      }));
       return;
     }
 
     const nextTab: WorkspaceTabState = {
-      id: `tab-document-${itemId}-${Date.now()}`,
+      id: `tab-document-${item.id}-${Date.now()}`,
       title: item.label,
       kind: "document",
       documentItemId: item.id,
@@ -852,6 +942,92 @@ function App() {
     }));
   };
 
+  const handleOpenDocumentInNewTab = (itemId: string) => {
+    const item = findDocumentItem(documentsSidebarItems, itemId);
+    if (!item || isDocumentFolder(item)) {
+      return;
+    }
+
+    openDocumentNoteInTab(item);
+  };
+
+  const handleOpenDocumentFromSidebar = (itemId: string) => {
+    const item = findDocumentItem(documentsSidebarItems, itemId);
+    if (!item || isDocumentFolder(item)) {
+      return;
+    }
+
+    setSelectedSidebarItems((current) => ({
+      ...current,
+      documents: item.id
+    }));
+
+    if (documentsOpenInNewTab) {
+      openDocumentNoteInTab(item);
+      return;
+    }
+
+    setActiveSection("documents");
+
+    if (activeTab.kind === "document") {
+      setTabs((currentTabs) =>
+        currentTabs.map((tab) =>
+          tab.id === activeTab.id
+            ? {
+                ...tab,
+                title: item.label,
+                documentItemId: item.id
+              }
+            : tab
+        )
+      );
+      return;
+    }
+
+    openSection("documents");
+  };
+
+  const handleMoveDocumentItem = (itemId: string, targetFolderId: string) => {
+    if (itemId === targetFolderId) {
+      return;
+    }
+
+    setDocumentsSidebarItems((currentItems) => {
+      const sourceItem = findDocumentItem(currentItems, itemId);
+      const targetFolder = findDocumentItem(currentItems, targetFolderId);
+
+      if (!sourceItem || !targetFolder || !isDocumentFolder(targetFolder)) {
+        return currentItems;
+      }
+
+      if (isDocumentFolder(sourceItem) && documentTreeContainsId(sourceItem, targetFolderId)) {
+        return currentItems;
+      }
+
+      const currentParentId = findDocumentParentFolderId(currentItems, itemId);
+      if (currentParentId === targetFolderId) {
+        return currentItems;
+      }
+
+      const detached = detachDocumentItem(currentItems, itemId);
+      if (!detached.item) {
+        return currentItems;
+      }
+
+      const destinationAfterDetach = findDocumentItem(detached.items, targetFolderId);
+      if (!destinationAfterDetach || !isDocumentFolder(destinationAfterDetach)) {
+        return currentItems;
+      }
+
+      return appendDocumentItem(detached.items, targetFolderId, detached.item);
+    });
+
+    setActiveSection("documents");
+    setSelectedSidebarItems((current) => ({
+      ...current,
+      documents: itemId
+    }));
+  };
   const handleDuplicateDocumentItem = (itemId: string) => {
     const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
     if (!sourceItem) {
@@ -863,6 +1039,21 @@ function App() {
     duplicateItem.label = `${sourceItem.label} copy`;
 
     setDocumentsSidebarItems((currentItems) => appendDocumentItem(currentItems, parentFolderId, duplicateItem));
+
+    if (typeof window !== "undefined") {
+      const clonedNotePairs = collectClonedNoteIdPairs(sourceItem, duplicateItem);
+      for (const [sourceNoteId, clonedNoteId] of clonedNotePairs) {
+        const sourceKey = getDocumentMarkdownStorageKey(sourceNoteId);
+        const targetKey = getDocumentMarkdownStorageKey(clonedNoteId);
+        const serializedMarkdown = window.localStorage.getItem(sourceKey);
+
+        if (serializedMarkdown === null) {
+          window.localStorage.removeItem(targetKey);
+        } else {
+          window.localStorage.setItem(targetKey, serializedMarkdown);
+        }
+      }
+    }
     setSelectedSidebarItems((current) => ({
       ...current,
       documents: duplicateItem.id
@@ -912,6 +1103,12 @@ function App() {
     setDocumentsSidebarItems(result.items);
 
     const removedIdSet = new Set(result.removedIds);
+
+    if (typeof window !== "undefined") {
+      for (const removedId of result.removedIds) {
+        window.localStorage.removeItem(getDocumentMarkdownStorageKey(removedId));
+      }
+    }
     setSelectedSidebarItems((current) =>
       removedIdSet.has(current.documents)
         ? {
@@ -1038,6 +1235,25 @@ function App() {
       : activeTab.kind === "document"
         ? "documents"
         : activeSection;
+
+  const activeDocumentNoteId = (() => {
+    if (contentSection !== "documents") {
+      return undefined;
+    }
+
+    if (activeTab.kind === "document" && activeTab.documentItemId) {
+      const documentTabItem = findDocumentItem(documentsSidebarItems, activeTab.documentItemId);
+      if (documentTabItem && isDocumentNote(documentTabItem)) {
+        return documentTabItem.id;
+      }
+    }
+
+    if (selectedDocumentItem && isDocumentNote(selectedDocumentItem)) {
+      return selectedDocumentItem.id;
+    }
+
+    return undefined;
+  })();
 
   const handleStartCodexSession = useCallback(() => {
     void (async () => {
@@ -1647,7 +1863,7 @@ function App() {
     }
 
     if (sectionId === "documents") {
-      return <DocumentsScreen theme={theme} />;
+      return <DocumentsScreen key={activeDocumentNoteId ?? "documents-no-note"} theme={theme} noteId={activeDocumentNoteId} />;
     }
     if (sectionId === "runs") {
       return <RunsScreen runs={sortedRuns} />;
@@ -1667,8 +1883,10 @@ function App() {
         selectedCategory={settingsCategory}
         codexCommandPath={codexCommandPath}
         codexDisableAltScreen={codexDisableAltScreen}
+        documentsOpenInNewTab={documentsOpenInNewTab}
         onCodexCommandPathChange={setCodexCommandPath}
         onCodexDisableAltScreenChange={setCodexDisableAltScreen}
+        onDocumentsOpenInNewTabChange={setDocumentsOpenInNewTab}
       />
     );
   };
@@ -1747,6 +1965,7 @@ function App() {
                 [activeSection]: itemId
               }))
             }
+            onOpenNote={handleOpenDocumentFromSidebar}
             onCreateNote={handleCreateDocumentNote}
             onCreateFolder={handleCreateDocumentFolder}
             onOpenInNewTab={handleOpenDocumentInNewTab}
@@ -1754,6 +1973,7 @@ function App() {
             onCopyPath={handleCopyDocumentPath}
             onRenameItem={handleRenameDocumentItem}
             onDeleteItem={handleDeleteDocumentItem}
+            onMoveItem={handleMoveDocumentItem}
           />
         ) : (
           <CollapsibleSidebar
@@ -1820,19 +2040,6 @@ function App() {
 }
 
 export default App;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -7,8 +7,10 @@ interface SettingsScreenProps {
   selectedCategory: string;
   codexCommandPath: string;
   codexDisableAltScreen: boolean;
+  documentsOpenInNewTab: boolean;
   onCodexCommandPathChange: (value: string) => void;
   onCodexDisableAltScreenChange: (value: boolean) => void;
+  onDocumentsOpenInNewTabChange: (value: boolean) => void;
 }
 
 const codexPathSuggestions = [
@@ -24,8 +26,10 @@ export function SettingsScreen({
   selectedCategory,
   codexCommandPath,
   codexDisableAltScreen,
+  documentsOpenInNewTab,
   onCodexCommandPathChange,
-  onCodexDisableAltScreenChange
+  onCodexDisableAltScreenChange,
+  onDocumentsOpenInNewTabChange
 }: SettingsScreenProps) {
   const [draftCodexPath, setDraftCodexPath] = useState(codexCommandPath);
 
@@ -47,7 +51,11 @@ export function SettingsScreen({
       rows: [
         { label: "Theme", value: "Dark-first with light option" },
         { label: "Layout", value: "Two-part sidebar + workspace panes" },
-        { label: "Density", value: "Compact desktop" }
+        { label: "Density", value: "Compact desktop" },
+        {
+          label: "Documents note click",
+          value: documentsOpenInNewTab ? "Open in new tab" : "Open in current tab"
+        }
       ]
     },
     "settings-workspace": {
@@ -159,6 +167,25 @@ export function SettingsScreen({
             </label>
             <p className="muted settings-help-copy">
               Compact mode can reduce full-screen redraws in the dock. Turn it off for native full-screen Codex UI.
+            </p>
+          </div>
+        </article>
+      )}
+
+      {selectedCategory === "settings-general" && (
+        <article className="pane-block">
+          <h3 className="block-title">Documents behavior</h3>
+          <div className="settings-toggle-row">
+            <label className="settings-toggle-label">
+              <input
+                type="checkbox"
+                checked={documentsOpenInNewTab}
+                onChange={(event) => onDocumentsOpenInNewTabChange(event.target.checked)}
+              />
+              Open notes in a new tab when clicked in the sidebar
+            </label>
+            <p className="muted settings-help-copy">
+              Turn this off to reuse the current tab instead of opening a new one.
             </p>
           </div>
         </article>

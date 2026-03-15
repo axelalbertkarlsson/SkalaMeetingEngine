@@ -9,40 +9,18 @@ type ThemeMode = "dark" | "light";
 
 interface DocumentsScreenProps {
   theme: ThemeMode;
+  noteId?: string;
 }
 
-const defaultDocument = `# Meeting Working Document
+function getDocumentMarkdownStorageKey(noteId?: string) {
+  return noteId ? `documents.markdown.${noteId}` : "documents.markdown.unbound";
+}
 
-Use this page as a first-class markdown workspace for synthesis and publish prep.
-
-## Quick outline
-
-- [ ] Capture key decisions
-- [ ] Confirm owners and deadlines
-- [ ] Prepare publish-ready summary
-
-## Links
-
-- [Project board](https://example.com)
-- [Design notes](https://example.com)
-
-## Action items
-
-| Owner | Task | Due |
-| --- | --- | --- |
-| Alex | Validate notes | 2026-03-15 |
-| Sam | Publish to vault | 2026-03-18 |
-
-> Keep claims conservative unless supported by transcript evidence.
-
-\`\`\`bash
-# Example snippet
-codex --workspace .
-\`\`\`
-`;
-
-export function DocumentsScreen({ theme }: DocumentsScreenProps) {
-  const [markdown, setMarkdown] = useLocalStorageState<string>("documents.markdown", defaultDocument);
+export function DocumentsScreen({ theme, noteId }: DocumentsScreenProps) {
+  const [markdown, setMarkdown] = useLocalStorageState<string>(
+    getDocumentMarkdownStorageKey(noteId),
+    ""
+  );
   const [previewCollapsed, setPreviewCollapsed] = useLocalStorageState<boolean>(
     "documents.previewCollapsed",
     false
@@ -67,6 +45,17 @@ export function DocumentsScreen({ theme }: DocumentsScreenProps) {
       <span>{previewCollapsed ? "Show Preview" : "Hide Preview"}</span>
     </button>
   );
+
+  if (!noteId) {
+    return (
+      <section className="workspace-screen documents-screen">
+        <article className="pane-block">
+          <h3 className="block-title">No note selected</h3>
+          <p className="muted">Create or select a note in the Documents sidebar to start editing.</p>
+        </article>
+      </section>
+    );
+  }
 
   return (
     <section className="workspace-screen documents-screen">
