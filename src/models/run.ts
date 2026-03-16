@@ -5,16 +5,29 @@ export type RunType =
   | "note_generation"
   | "codex_session";
 
-export type RunStatus = "queued" | "running" | "needs_review" | "completed" | "failed";
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "capturing"
+  | "imported"
+  | "queued_for_transcription"
+  | "transcribing"
+  | "cleaning"
+  | "needs_review"
+  | "completed"
+  | "failed";
 
 export type ArtifactKind =
   | "raw_recording"
   | "raw_transcript"
   | "cleaned_transcript"
+  | "provider_response"
   | "structured_extraction"
   | "obsidian_preview"
   | "publish_log"
   | "terminal_log";
+
+export type RecordingSource = "microphone" | "system_audio" | "mixed" | "imported_file";
 
 export interface Artifact {
   id: string;
@@ -22,16 +35,23 @@ export interface Artifact {
   kind: ArtifactKind;
   path: string;
   createdAt: string;
+  label?: string;
 }
 
 export interface Run {
   id: string;
   workspaceId: string;
+  workspaceRoot?: string;
   title: string;
   type: RunType;
   status: RunStatus;
   startedAt: string;
   endedAt?: string;
   artifactIds: string[];
+  artifacts?: Artifact[];
   summary?: string;
+  errorMessage?: string;
+  progressLabel?: string;
+  recordingSource?: RecordingSource;
+  inputPath?: string;
 }
