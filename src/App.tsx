@@ -4,11 +4,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
 import { BottomPanel, type BottomPanelView } from "./components/shell/BottomPanel";
 import { ConfirmDialog } from "./components/shell/ConfirmDialog";
+import { RenameDialog } from "./components/shell/RenameDialog";
 import {
   CodexTerminalPanel,
   type CodexSessionState,
-  type CodexTerminalEntry,
-  type CodexTerminalStream
+  type CodexTerminalEntry
 } from "./components/shell/CodexTerminalPanel";
 import {
   CollapsibleSidebar,
@@ -33,9 +33,19 @@ import {
   SunIcon,
   VaultIcon
 } from "./components/shell/icons";
-import { artifacts, runs, workspaces } from "./data/mockData";
+import { artifacts as mockArtifacts, runs as mockRuns, workspaces } from "./data/mockData";
+import {
+  getTranscriptionSettings,
+  importMeetingFile,
+  listMeetingRuns,
+  retryMeetingRun,
+  saveTranscriptionSettings,
+  startRecording,
+  stopRecording,
+  type TranscriptionSettings
+} from "./lib/meetingApi";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
-import type { Run, RunStatus } from "./models/run";
+import type { RecordingSource, Run, RunStatus } from "./models/run";
 import { CodexScreen } from "./screens/CodexScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { MeetingsScreen } from "./screens/MeetingsScreen";
@@ -58,6 +68,7 @@ interface SpawnCodexProcessResponse {
   session_id: string;
   status: string;
   message: string;
+  capture_bundle_path?: string | null;
 }
 
 interface OperationAck {
@@ -69,6 +80,7 @@ interface OperationAck {
 interface TerminalExitEventPayload {
   session_id: string;
   code: number | null;
+  capture_bundle_path?: string | null;
 }
 
 const TERMINAL_EXIT_EVENT = "codex://terminal-exit";
@@ -373,6 +385,11 @@ function cloneDocumentItem(item: DocumentTreeItem): DocumentTreeItem {
 const statusLabels: Record<RunStatus, string> = {
   queued: "Queued",
   running: "Running",
+  capturing: "Capturing",
+  imported: "Imported",
+  queued_for_transcription: "Queued for transcription",
+  transcribing: "Transcribing",
+  cleaning: "Cleaning",
   needs_review: "Needs review",
   completed: "Completed",
   failed: "Failed"
@@ -381,6 +398,11 @@ const statusLabels: Record<RunStatus, string> = {
 const statusTone: Record<RunStatus, "neutral" | "warning" | "success" | "danger"> = {
   queued: "neutral",
   running: "neutral",
+  capturing: "neutral",
+  imported: "neutral",
+  queued_for_transcription: "neutral",
+  transcribing: "neutral",
+  cleaning: "neutral",
   needs_review: "warning",
   completed: "success",
   failed: "danger"
@@ -420,6 +442,17 @@ function sortRunsByStartedAt(items: Run[]) {
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function isActiveRunStatus(status: RunStatus) {
+  return [
+    "queued",
+    "running",
+    "capturing",
+    "queued_for_transcription",
+    "transcribing",
+    "cleaning"
+  ].includes(status);
 }
 
 function App() {
@@ -474,6 +507,12 @@ function App() {
     label: string;
     kind: "folder" | "note";
   } | null>(null);
+  const [pendingRename, setPendingRename] = useState<{
+    itemId: string;
+    label: string;
+    kind: "folder" | "note";
+    value: string;
+  } | null>(null);
 
   const [codexSession, setCodexSession] = useState<CodexSessionState>({
     sessionId: null,
@@ -491,19 +530,65 @@ function App() {
     "settings.codex.disableAltScreen",
     true
   );
+  const [codexCaptureDebugBundle, setCodexCaptureDebugBundle] = useLocalStorageState<boolean>(
+    "settings.codex.captureDebugBundle",
+    false
+  );
   const [documentsOpenInNewTab, setDocumentsOpenInNewTab] = useLocalStorageState<boolean>(
     "settings.documents.openInNewTab",
     true
   );
-  const sortedRuns = useMemo(() => sortRunsByStartedAt(runs), []);
+  const staticRuns = useMemo(
+    () => mockRuns.filter((run) => run.type !== "meeting_import" && run.type !== "meeting_recording"),
+    []
+  );
+  const fallbackMeetingRuns = useMemo(
+    () => sortRunsByStartedAt(mockRuns.filter((run) => run.type === "meeting_import" || run.type === "meeting_recording")),
+    []
+  );
+  const [meetingRuns, setMeetingRuns] = useState<Run[]>(fallbackMeetingRuns);
+  const [meetingRunsLoading, setMeetingRunsLoading] = useState(false);
+  const [meetingActionMessage, setMeetingActionMessage] = useState<string | null>(null);
+  const [openAiApiKey, setOpenAiApiKey] = useLocalStorageState<string>(
+    "settings.transcription.openAiApiKey",
+    ""
+  );
+  const [cleanupModel, setCleanupModel] = useLocalStorageState<string>(
+    "settings.transcription.cleanupModel",
+    "gpt-5-mini"
+  );
+  const [ffmpegPath, setFfmpegPath] = useLocalStorageState<string>(
+    "settings.transcription.ffmpegPath",
+    "ffmpeg"
+  );
+  const [diarizationEnabled, setDiarizationEnabled] = useLocalStorageState<boolean>(
+    "settings.transcription.diarizationEnabled",
+    false
+  );
+  const [transcriptionStatusMessage, setTranscriptionStatusMessage] = useState<string | null>(null);
+  const transcriptionSettings = useMemo<TranscriptionSettings>(
+    () => ({
+      openAiApiKey: openAiApiKey || undefined,
+      cleanupModel,
+      ffmpegPath,
+      transcriptionModel: "gpt-4o-transcribe",
+      diarizationEnabled
+    }),
+    [cleanupModel, diarizationEnabled, ffmpegPath, openAiApiKey]
+  );
+  const sortedRuns = useMemo(() => sortRunsByStartedAt([...staticRuns, ...meetingRuns]), [meetingRuns, staticRuns]);
+  const artifactCount = useMemo(
+    () => mockArtifacts.length + meetingRuns.reduce((count, run) => count + (run.artifacts?.length ?? 0), 0),
+    [meetingRuns]
+  );
 
   const runStats = useMemo(
     () => ({
-      total: runs.length,
-      openReviewCount: runs.filter((run) => run.status === "needs_review").length,
-      runningCount: runs.filter((run) => run.status === "running").length
+      total: sortedRuns.length,
+      openReviewCount: sortedRuns.filter((run) => run.status === "needs_review").length,
+      runningCount: sortedRuns.filter((run) => isActiveRunStatus(run.status)).length
     }),
-    []
+    [sortedRuns]
   );
 
   const appendTerminalEntry = useCallback((entry: CodexTerminalEntry) => {
@@ -514,7 +599,7 @@ function App() {
     const recentMeetingRuns = sortedRuns.filter(
       (run) => run.type === "meeting_import" || run.type === "meeting_recording"
     );
-    const runningRuns = sortedRuns.filter((run) => run.status === "running");
+    const runningRuns = sortedRuns.filter((run) => isActiveRunStatus(run.status));
     const awaitingReview = sortedRuns.filter((run) => run.status === "needs_review");
     const completedRuns = sortedRuns.filter((run) => run.status === "completed");
     const failedRuns = sortedRuns.filter((run) => run.status === "failed");
@@ -742,6 +827,141 @@ function App() {
     };
   }, [sortedRuns, workspace]);
 
+  const refreshMeetingRuns = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      setMeetingRuns(fallbackMeetingRuns);
+      return;
+    }
+
+    setMeetingRunsLoading(true);
+    try {
+      const liveRuns = await listMeetingRuns({
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.rootPath
+      });
+      setMeetingRuns(sortRunsByStartedAt(liveRuns));
+    } catch (error) {
+      setMeetingActionMessage(`Failed to load meeting runs: ${String(error)}`);
+    } finally {
+      setMeetingRunsLoading(false);
+    }
+  }, [fallbackMeetingRuns, workspace.id, workspace.rootPath]);
+
+  const handleImportMeetingFile = useCallback(
+    async (meetingTitle: string, file: File) => {
+      try {
+        const run = await importMeetingFile(
+          {
+            workspaceId: workspace.id,
+            workspaceRoot: workspace.rootPath
+          },
+          meetingTitle,
+          file
+        );
+        setMeetingActionMessage(`Imported '${run.title}' and queued transcription.`);
+        await refreshMeetingRuns();
+      } catch (error) {
+        setMeetingActionMessage(`Import failed: ${String(error)}`);
+      }
+    },
+    [refreshMeetingRuns, workspace.id, workspace.rootPath]
+  );
+
+  const handleStartMeetingRecording = useCallback(
+    async (meetingTitle: string, source: RecordingSource) => {
+      try {
+        const response = await startRecording(
+          {
+            workspaceId: workspace.id,
+            workspaceRoot: workspace.rootPath
+          },
+          meetingTitle,
+          source
+        );
+        setMeetingActionMessage(response.message);
+        await refreshMeetingRuns();
+      } catch (error) {
+        setMeetingActionMessage(`Recording start failed: ${String(error)}`);
+      }
+    },
+    [refreshMeetingRuns, workspace.id, workspace.rootPath]
+  );
+
+  const handleStopMeetingRecording = useCallback(
+    async (runId: string) => {
+      try {
+        await stopRecording(runId);
+        setMeetingActionMessage('Recording stopped. Transcription queued.');
+        await refreshMeetingRuns();
+      } catch (error) {
+        setMeetingActionMessage(`Recording stop failed: ${String(error)}`);
+      }
+    },
+    [refreshMeetingRuns]
+  );
+
+  const handleRetryMeetingRun = useCallback(
+    async (runId: string) => {
+      try {
+        const run = await retryMeetingRun(workspace.rootPath, runId);
+        setMeetingActionMessage(`Requeued transcription for '${run.title}'.`);
+        await refreshMeetingRuns();
+      } catch (error) {
+        setMeetingActionMessage(`Retry failed: ${String(error)}`);
+      }
+    },
+    [refreshMeetingRuns, workspace.rootPath]
+  );
+
+  const handleSaveTranscriptionSettings = useCallback(
+    async (settingsInput: TranscriptionSettings) => {
+      try {
+        const saved = await saveTranscriptionSettings(settingsInput);
+        setOpenAiApiKey(saved.openAiApiKey ?? '');
+        setCleanupModel(saved.cleanupModel);
+        setFfmpegPath(saved.ffmpegPath);
+        setDiarizationEnabled(saved.diarizationEnabled);
+        setTranscriptionStatusMessage('Transcription settings saved.');
+      } catch (error) {
+        setTranscriptionStatusMessage(`Failed to save transcription settings: ${String(error)}`);
+      }
+    },
+    [setCleanupModel, setDiarizationEnabled, setFfmpegPath, setOpenAiApiKey]
+  );
+
+  useEffect(() => {
+    void refreshMeetingRuns();
+  }, [refreshMeetingRuns]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshMeetingRuns();
+    }, 4000);
+
+    return () => window.clearInterval(intervalId);
+  }, [refreshMeetingRuns]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const settingsValue = await getTranscriptionSettings();
+        setOpenAiApiKey(settingsValue.openAiApiKey ?? '');
+        setCleanupModel(settingsValue.cleanupModel);
+        setFfmpegPath(settingsValue.ffmpegPath);
+        setDiarizationEnabled(settingsValue.diarizationEnabled);
+      } catch (error) {
+        setTranscriptionStatusMessage(`Failed to load transcription settings: ${String(error)}`);
+      }
+    })();
+  }, [setCleanupModel, setDiarizationEnabled, setFfmpegPath, setOpenAiApiKey]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
@@ -804,18 +1024,19 @@ function App() {
             return {
               sessionId: current.sessionId,
               status: "stopped",
-              message: `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}.`,
+              message: event.payload.capture_bundle_path
+                ? `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}. Capture bundle: ${event.payload.capture_bundle_path}`
+                : `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}.`,
               lastExitCode: event.payload.code
             };
           });
 
           appendTerminalEntry({
             sessionId: event.payload.session_id,
-            stream: "system",
-            chunk:
+            text:
               event.payload.code === null
-                ? "\n[system] Codex process exited.\n"
-                : `\n[system] Codex process exited with code ${event.payload.code}.\n`
+                ? `\n[system] Codex process exited.${event.payload.capture_bundle_path ? `\n[system] Capture bundle: ${event.payload.capture_bundle_path}` : ""}\n`
+                : `\n[system] Codex process exited with code ${event.payload.code}.${event.payload.capture_bundle_path ? `\n[system] Capture bundle: ${event.payload.capture_bundle_path}` : ""}\n`
           });
         });
 
@@ -828,8 +1049,7 @@ function App() {
       } catch (error) {
         appendTerminalEntry({
           sessionId: "unknown",
-          stream: "system",
-          chunk: `\n[system] Failed to register terminal listeners: ${String(error)}\n`
+          text: `\n[system] Failed to register terminal listeners: ${String(error)}\n`
         });
       }
     };
@@ -1081,12 +1301,31 @@ function App() {
       return;
     }
 
-    const nextLabel = window.prompt("Rename", sourceItem.label)?.trim();
-    if (!nextLabel || nextLabel === sourceItem.label) {
+    setPendingRename({
+      itemId,
+      label: sourceItem.label,
+      kind: isDocumentFolder(sourceItem) ? "folder" : "note",
+      value: sourceItem.label
+    });
+  };
+
+  const handleConfirmRenameDocumentItem = () => {
+    if (!pendingRename) {
       return;
     }
 
-    setDocumentsSidebarItems((currentItems) => updateDocumentLabel(currentItems, itemId, nextLabel));
+    const nextLabel = pendingRename.value.trim();
+    if (!nextLabel) {
+      return;
+    }
+
+    if (nextLabel !== pendingRename.label) {
+      setDocumentsSidebarItems((currentItems) =>
+        updateDocumentLabel(currentItems, pendingRename.itemId, nextLabel)
+      );
+    }
+
+    setPendingRename(null);
   };
 
   const executeDeleteDocumentItem = (itemId: string) => {
@@ -1186,19 +1425,20 @@ function App() {
   };
 
   useEffect(() => {
-    if (!pendingDelete) {
+    if (!pendingDelete && !pendingRename) {
       return;
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setPendingDelete(null);
+        setPendingRename(null);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pendingDelete]);
+  }, [pendingDelete, pendingRename]);
 
   useEffect(() => {
     setTabs((currentTabs) => {
@@ -1265,6 +1505,8 @@ function App() {
 
       setBottomPanelOpen(true);
       setActiveBottomViewId("terminal");
+      setCodexTerminalEntries([]);
+      setCodexTerminalClearSignal((current) => current + 1);
       setCodexSession((current) => ({
         ...current,
         status: "starting",
@@ -1280,8 +1522,7 @@ function App() {
         }));
         appendTerminalEntry({
           sessionId: "local-preview",
-          stream: "system",
-          chunk: "\n[system] Tauri runtime unavailable, cannot spawn Codex here.\n"
+          text: "\n[system] Tauri runtime unavailable, cannot spawn Codex here.\n"
         });
         return;
       }
@@ -1291,16 +1532,26 @@ function App() {
           request: {
             workspace_path: workspace.rootPath,
             command: commandPath,
-            args: codexDisableAltScreen ? ["--no-alt-screen"] : []
+            args: codexDisableAltScreen ? ["--no-alt-screen"] : [],
+            capture_debug_bundle: codexCaptureDebugBundle
           }
         });
 
         setCodexSession({
           sessionId: response.session_id,
           status: "running",
-          message: response.message,
+          message: response.capture_bundle_path
+            ? `${response.message} Capture bundle: ${response.capture_bundle_path}`
+            : response.message,
           lastExitCode: null
         });
+
+        if (response.capture_bundle_path) {
+          appendTerminalEntry({
+            sessionId: response.session_id,
+            text: `\n[system] Debug capture bundle: ${response.capture_bundle_path}\n`
+          });
+        }
       } catch (error) {
         const message = `Failed to start Codex: ${String(error)}`;
         setCodexSession((current) => ({
@@ -1311,12 +1562,19 @@ function App() {
 
         appendTerminalEntry({
           sessionId: codexSession.sessionId ?? "unknown",
-          stream: "system",
-          chunk: `\n[system] ${message}\n`
+          text: `\n[system] ${message}\n`
         });
       }
     })();
-  }, [appendTerminalEntry, codexCommandPath, codexDisableAltScreen, codexSession.sessionId, codexSession.status, workspace.rootPath]);
+  }, [
+    appendTerminalEntry,
+    codexCaptureDebugBundle,
+    codexCommandPath,
+    codexDisableAltScreen,
+    codexSession.sessionId,
+    codexSession.status,
+    workspace.rootPath
+  ]);
 
   const handleStopCodexSession = useCallback(() => {
     void (async () => {
@@ -1339,8 +1597,7 @@ function App() {
 
         appendTerminalEntry({
           sessionId: codexSession.sessionId,
-          stream: "system",
-          chunk: `\n[system] ${response.message}\n`
+          text: `\n[system] ${response.message}\n`
         });
       } catch (error) {
         const message = `Failed to stop Codex: ${String(error)}`;
@@ -1352,8 +1609,7 @@ function App() {
 
         appendTerminalEntry({
           sessionId: codexSession.sessionId,
-          stream: "system",
-          chunk: `\n[system] ${message}\n`
+          text: `\n[system] ${message}\n`
         });
       }
     })();
@@ -1376,8 +1632,7 @@ function App() {
         } catch (error) {
           appendTerminalEntry({
             sessionId: codexSession.sessionId,
-            stream: "system",
-            chunk: `\n[system] Failed to send input: ${String(error)}\n`
+            text: `\n[system] Failed to send input: ${String(error)}\n`
           });
         }
       })();
@@ -1430,7 +1685,7 @@ function App() {
           rows: [
             { label: "Needs review", value: String(runStats.openReviewCount), tone: "warning" },
             { label: "Running", value: String(runStats.runningCount) },
-            { label: "Artifacts", value: String(artifacts.length) }
+            { label: "Artifacts", value: String(artifactCount) }
           ]
         },
         {
@@ -1582,8 +1837,8 @@ function App() {
         id: "logs",
         label: "Logs",
         lines: [
-          "[log] Ready for recording/import workflow hooks.",
-          "[log] Transcription provider boundary not implemented in this task.",
+          "[log] Meeting import and recording now create persisted runs.",
+          "[log] OpenAI transcription and cleanup write raw and cleaned transcript artifacts.",
           "[log] Review-first publish flow remains UI scaffold only.",
           "[log] Theme tokens loaded from centralized CSS variables."
         ]
@@ -1608,6 +1863,7 @@ function App() {
             session={codexSession}
             entries={codexTerminalEntries}
             clearSignal={codexTerminalClearSignal}
+            captureEnabled={codexCaptureDebugBundle}
             onStart={handleStartCodexSession}
             onStop={handleStopCodexSession}
             onClear={handleClearTerminal}
@@ -1622,6 +1878,7 @@ function App() {
   }, [
     bottomPanelHeight,
     bottomPanelOpen,
+    codexCaptureDebugBundle,
     codexSession,
     codexTerminalClearSignal,
     codexTerminalEntries,
@@ -1859,7 +2116,19 @@ function App() {
     }
 
     if (sectionId === "meetings") {
-      return <MeetingsScreen runs={sortedRuns} />;
+      return (
+        <MeetingsScreen
+          workspace={workspace}
+          runs={meetingRuns}
+          loading={meetingRunsLoading}
+          actionMessage={meetingActionMessage}
+          onImportFile={handleImportMeetingFile}
+          onStartRecording={handleStartMeetingRecording}
+          onStopRecording={handleStopMeetingRecording}
+          onRetryRun={handleRetryMeetingRun}
+          onRefresh={refreshMeetingRuns}
+        />
+      );
     }
 
     if (sectionId === "documents") {
@@ -1883,10 +2152,15 @@ function App() {
         selectedCategory={settingsCategory}
         codexCommandPath={codexCommandPath}
         codexDisableAltScreen={codexDisableAltScreen}
+        codexCaptureDebugBundle={codexCaptureDebugBundle}
         documentsOpenInNewTab={documentsOpenInNewTab}
+        transcriptionSettings={transcriptionSettings}
+        transcriptionStatusMessage={transcriptionStatusMessage}
         onCodexCommandPathChange={setCodexCommandPath}
         onCodexDisableAltScreenChange={setCodexDisableAltScreen}
+        onCodexCaptureDebugBundleChange={setCodexCaptureDebugBundle}
         onDocumentsOpenInNewTabChange={setDocumentsOpenInNewTab}
+        onSaveTranscriptionSettings={handleSaveTranscriptionSettings}
       />
     );
   };
@@ -2014,10 +2288,23 @@ function App() {
       <footer className="shell-status muted">
         <FolderIcon />
         <span>
-          Workspace: {workspace.name} - Local artifacts: {artifacts.length}
+          Workspace: {workspace.name} - Local artifacts: {artifactCount}
         </span>
       </footer>
     </AppShell>
+    {pendingRename ? (
+      <RenameDialog
+        title={`Rename ${pendingRename.kind}`}
+        value={pendingRename.value}
+        confirmLabel="Rename"
+        cancelLabel="Cancel"
+        onValueChange={(value) =>
+          setPendingRename((current) => (current ? { ...current, value } : current))
+        }
+        onConfirm={handleConfirmRenameDocumentItem}
+        onCancel={() => setPendingRename(null)}
+      />
+    ) : null}
 
     {pendingDelete ? (
       <ConfirmDialog
@@ -2040,6 +2327,15 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
+
+
 
 
 

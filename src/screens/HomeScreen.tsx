@@ -1,4 +1,4 @@
-﻿import { PaneHeader } from "../components/shell/PaneHeader";
+import { PaneHeader } from "../components/shell/PaneHeader";
 import type { Run } from "../models/run";
 import type { Workspace } from "../models/workspace";
 
@@ -12,9 +12,15 @@ interface HomeScreenProps {
   };
 }
 
+function isActiveRun(run: Run) {
+  return ["queued", "running", "capturing", "queued_for_transcription", "transcribing", "cleaning"].includes(
+    run.status
+  );
+}
+
 export function HomeScreen({ workspace, runs, stats }: HomeScreenProps) {
   const recentRuns = runs.slice(0, 5);
-  const continueWorking = runs.filter((run) => run.status === "running" || run.status === "needs_review");
+  const continueWorking = runs.filter((run) => isActiveRun(run) || run.status === "needs_review");
   const reviewQueue = runs.filter((run) => run.status === "needs_review");
 
   return (
@@ -67,4 +73,3 @@ export function HomeScreen({ workspace, runs, stats }: HomeScreenProps) {
     </section>
   );
 }
-

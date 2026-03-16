@@ -1,4 +1,3 @@
 pub mod codex;
-pub mod recording;
-pub mod transcription;
+pub mod meetings;
 pub mod types;

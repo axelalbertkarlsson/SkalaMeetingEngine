@@ -322,7 +322,7 @@ export function DocumentsSidebar({
     setContextMenu(null);
   };
 
-  const renderTree = (items: DocumentTreeItem[], depth = 0) => {
+  const renderTree = (items: DocumentTreeItem[], depth = 0, parentFolderId: string | null = null) => {
     return (
       <ul className="documents-tree-list" role={depth === 0 ? "tree" : "group"}>
         {items.map((item) => {
@@ -330,7 +330,8 @@ export function DocumentsSidebar({
           const hasChildren = isFolderItem && Boolean(item.children?.length);
           const isExpanded = hasChildren && expandedIds.has(item.id);
           const isActive = item.id === selectedItemId;
-          const isDropTarget = dropTargetFolderId === item.id;
+          const rowDropFolderId = isFolderItem ? item.id : parentFolderId;
+          const isDropTarget = rowDropFolderId !== null && dropTargetFolderId === rowDropFolderId;
           const isDragging = draggingItemId === item.id;
 
           const rowClassName = [
@@ -429,7 +430,7 @@ export function DocumentsSidebar({
                 style={{ paddingInlineStart: `${8 + depth * 18}px` }}
                 data-doc-tree-row="true"
                 data-doc-item-id={item.id}
-                data-doc-folder-id={isFolderItem ? item.id : undefined}
+                data-doc-folder-id={rowDropFolderId ?? undefined}
                 onPointerDown={onPointerDown}
                 onClick={() => {
                   if (dragJustEndedRef.current) {
@@ -461,7 +462,7 @@ export function DocumentsSidebar({
                 <span className="documents-tree-label">{item.label}</span>
               </button>
 
-              {hasChildren && isExpanded ? renderTree(item.children ?? [], depth + 1) : null}
+              {hasChildren && isExpanded ? renderTree(item.children ?? [], depth + 1, item.id) : null}
             </li>
           );
         })}
@@ -555,3 +556,5 @@ export function DocumentsSidebar({
     </div>
   );
 }
+
+
