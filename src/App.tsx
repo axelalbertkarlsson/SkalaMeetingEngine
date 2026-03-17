@@ -45,6 +45,11 @@ import {
   type TranscriptionSettings
 } from "./lib/meetingApi";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
+import {
+  copyDocumentNoteFile,
+  deleteDocumentNoteFile,
+  writeDocumentNoteFile
+} from "./services/documentsFileStore";
 import type { RecordingSource, Run, RunStatus } from "./models/run";
 import { CodexScreen } from "./screens/CodexScreen";
 import { HomeScreen } from "./screens/HomeScreen";
@@ -63,6 +68,7 @@ type SectionId =
   | "codex"
   | "settings";
 type ThemeMode = "dark" | "light";
+type DocumentsEditorFont = "ibm-plex-sans" | "switzer";
 
 interface SpawnCodexProcessResponse {
   session_id: string;
@@ -157,6 +163,21 @@ function collectClonedNoteIdPairs(
   }
 
   return pairs;
+}
+
+function collectDocumentNoteIds(
+  item: DocumentTreeItem,
+  noteIds: string[] = []
+): string[] {
+  if (isDocumentNote(item)) {
+    noteIds.push(item.id);
+  }
+
+  item.children?.forEach((child) => {
+    collectDocumentNoteIds(child, noteIds);
+  });
+
+  return noteIds;
 }
 
 function findDocumentItem(items: DocumentTreeItem[], itemId: string): DocumentTreeItem | undefined {
@@ -537,6 +558,14 @@ function App() {
   const [documentsOpenInNewTab, setDocumentsOpenInNewTab] = useLocalStorageState<boolean>(
     "settings.documents.openInNewTab",
     true
+  );
+  const [documentsBasePath, setDocumentsBasePath] = useLocalStorageState<string>(
+    "settings.documents.basePath",
+    ""
+  );
+  const [documentsEditorFont, setDocumentsEditorFont] = useLocalStorageState<DocumentsEditorFont>(
+    "settings.documents.editorFont",
+    "switzer"
   );
   const staticRuns = useMemo(
     () => mockRuns.filter((run) => run.type !== "meeting_import" && run.type !== "meeting_recording"),
@@ -1068,11 +1097,15 @@ function App() {
   const selectedSidebarItemId = (() => {
     const storedSelection = selectedSidebarItems[activeSection];
     if (activeSection === "documents") {
+      if (storedSelection === "") {
+        return "";
+      }
+
       if (storedSelection && findDocumentItem(documentsSidebarItems, storedSelection)) {
         return storedSelection;
       }
 
-      return documentsSidebarItems[0]?.id ?? "";
+      return "";
     }
 
     return storedSelection ?? activeSidebarGroups[0]?.items[0]?.id ?? "";
@@ -1083,8 +1116,13 @@ function App() {
     : undefined;
   const selectedDocumentFolderLabel = selectedDocumentItem?.label;
 
-  const createDocumentItem = (kind: "note" | "folder", parentFolderId?: string) => {
+  const createDocumentItem = (kind: "note" | "folder", parentFolderId?: string): DocumentTreeItem => {
     const nextId = createDocumentItemId(kind);
+    const nextNumber = countDocumentItemsByKind(documentsSidebarItems, kind) + 1;
+    const nextItem: DocumentTreeItem =
+      kind === "folder"
+        ? { id: nextId, label: `New folder ${nextNumber}`, kind: "folder", children: [] }
+        : { id: nextId, label: `New note ${nextNumber}`, kind: "note" };
 
     setDocumentsSidebarItems((currentItems) => {
       const resolvedParentFolderId =
@@ -1106,17 +1144,14 @@ function App() {
               return findDocumentParentFolderId(currentItems, selectedItem.id);
             })();
 
-      const nextNumber = countDocumentItemsByKind(currentItems, kind) + 1;
-      const nextItem: DocumentTreeItem =
-        kind === "folder"
-          ? { id: nextId, label: `New folder ${nextNumber}`, kind: "folder", children: [] }
-          : { id: nextId, label: `New note ${nextNumber}`, kind: "note" };
-
       return appendDocumentItem(currentItems, resolvedParentFolderId, nextItem);
     });
 
     if (kind === "note" && typeof window !== "undefined") {
       window.localStorage.setItem(getDocumentMarkdownStorageKey(nextId), JSON.stringify(""));
+    }
+    if (kind === "note") {
+      void writeDocumentNoteFile(nextId, "", documentsBasePath);
     }
 
     setSelectedSidebarItems((current) => ({
@@ -1124,6 +1159,8 @@ function App() {
       documents: nextId
     }));
     setActiveSection("documents");
+
+    return nextItem;
   };
 
   const handleCreateDocumentNote = (parentFolderId?: string) => createDocumentItem("note", parentFolderId);
@@ -1189,38 +1226,55 @@ function App() {
 
     setActiveSection("documents");
 
-    if (activeTab.kind === "document") {
-      setTabs((currentTabs) =>
-        currentTabs.map((tab) =>
-          tab.id === activeTab.id
-            ? {
-                ...tab,
-                title: item.label,
-                documentItemId: item.id
-              }
-            : tab
-        )
-      );
-      return;
-    }
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) => {
+        if (tab.id !== activeTab.id) {
+          return tab;
+        }
 
-    openSection("documents");
+        if (tab.kind === "document") {
+          return {
+            ...tab,
+            title: item.label,
+            documentItemId: item.id
+          };
+        }
+
+        if (tab.kind === "section") {
+          return {
+            ...tab,
+            title: item.label,
+            sectionId: "documents",
+            documentItemId: item.id
+          };
+        }
+
+        return {
+          ...tab,
+          title: item.label
+        };
+      })
+    );
   };
 
-  const handleMoveDocumentItem = (itemId: string, targetFolderId: string) => {
-    if (itemId === targetFolderId) {
+  const handleMoveDocumentItem = (itemId: string, targetFolderId: string | null) => {
+    if (targetFolderId !== null && itemId === targetFolderId) {
       return;
     }
 
     setDocumentsSidebarItems((currentItems) => {
       const sourceItem = findDocumentItem(currentItems, itemId);
-      const targetFolder = findDocumentItem(currentItems, targetFolderId);
+      const targetFolder = targetFolderId ? findDocumentItem(currentItems, targetFolderId) : null;
 
-      if (!sourceItem || !targetFolder || !isDocumentFolder(targetFolder)) {
+      if (!sourceItem) {
         return currentItems;
       }
 
-      if (isDocumentFolder(sourceItem) && documentTreeContainsId(sourceItem, targetFolderId)) {
+      if (targetFolderId !== null && (!targetFolder || !isDocumentFolder(targetFolder))) {
+        return currentItems;
+      }
+
+      if (targetFolderId !== null && isDocumentFolder(sourceItem) && documentTreeContainsId(sourceItem, targetFolderId)) {
         return currentItems;
       }
 
@@ -1232,6 +1286,10 @@ function App() {
       const detached = detachDocumentItem(currentItems, itemId);
       if (!detached.item) {
         return currentItems;
+      }
+
+      if (targetFolderId === null) {
+        return appendDocumentItem(detached.items, null, detached.item);
       }
 
       const destinationAfterDetach = findDocumentItem(detached.items, targetFolderId);
@@ -1260,8 +1318,8 @@ function App() {
 
     setDocumentsSidebarItems((currentItems) => appendDocumentItem(currentItems, parentFolderId, duplicateItem));
 
+    const clonedNotePairs = collectClonedNoteIdPairs(sourceItem, duplicateItem);
     if (typeof window !== "undefined") {
-      const clonedNotePairs = collectClonedNoteIdPairs(sourceItem, duplicateItem);
       for (const [sourceNoteId, clonedNoteId] of clonedNotePairs) {
         const sourceKey = getDocumentMarkdownStorageKey(sourceNoteId);
         const targetKey = getDocumentMarkdownStorageKey(clonedNoteId);
@@ -1273,6 +1331,9 @@ function App() {
           window.localStorage.setItem(targetKey, serializedMarkdown);
         }
       }
+    }
+    for (const [sourceNoteId, clonedNoteId] of clonedNotePairs) {
+      void copyDocumentNoteFile(sourceNoteId, clonedNoteId, documentsBasePath);
     }
     setSelectedSidebarItems((current) => ({
       ...current,
@@ -1309,6 +1370,14 @@ function App() {
     });
   };
 
+  const handleInlineRenameDocumentItem = (itemId: string, nextLabel: string) => {
+    const trimmedLabel = nextLabel.trim();
+    if (!trimmedLabel) {
+      return;
+    }
+
+    setDocumentsSidebarItems((currentItems) => updateDocumentLabel(currentItems, itemId, trimmedLabel));
+  };
   const handleConfirmRenameDocumentItem = () => {
     if (!pendingRename) {
       return;
@@ -1334,6 +1403,7 @@ function App() {
       return;
     }
 
+    const removedNoteIds = collectDocumentNoteIds(sourceItem);
     const result = removeDocumentItem(documentsSidebarItems, itemId);
     if (!result.removedIds.length) {
       return;
@@ -1344,9 +1414,12 @@ function App() {
     const removedIdSet = new Set(result.removedIds);
 
     if (typeof window !== "undefined") {
-      for (const removedId of result.removedIds) {
-        window.localStorage.removeItem(getDocumentMarkdownStorageKey(removedId));
+      for (const removedNoteId of removedNoteIds) {
+        window.localStorage.removeItem(getDocumentMarkdownStorageKey(removedNoteId));
       }
+    }
+    for (const removedNoteId of removedNoteIds) {
+      void deleteDocumentNoteFile(removedNoteId, documentsBasePath);
     }
     setSelectedSidebarItems((current) =>
       removedIdSet.has(current.documents)
@@ -2132,7 +2205,7 @@ function App() {
     }
 
     if (sectionId === "documents") {
-      return <DocumentsScreen key={activeDocumentNoteId ?? "documents-no-note"} theme={theme} noteId={activeDocumentNoteId} />;
+      return <DocumentsScreen key={activeDocumentNoteId ?? "documents-no-note"} theme={theme} noteId={activeDocumentNoteId} documentsBasePath={documentsBasePath} editorFont={documentsEditorFont} />;
     }
     if (sectionId === "runs") {
       return <RunsScreen runs={sortedRuns} />;
@@ -2154,12 +2227,16 @@ function App() {
         codexDisableAltScreen={codexDisableAltScreen}
         codexCaptureDebugBundle={codexCaptureDebugBundle}
         documentsOpenInNewTab={documentsOpenInNewTab}
+        documentsBasePath={documentsBasePath}
+        documentsEditorFont={documentsEditorFont}
         transcriptionSettings={transcriptionSettings}
         transcriptionStatusMessage={transcriptionStatusMessage}
         onCodexCommandPathChange={setCodexCommandPath}
         onCodexDisableAltScreenChange={setCodexDisableAltScreen}
         onCodexCaptureDebugBundleChange={setCodexCaptureDebugBundle}
         onDocumentsOpenInNewTabChange={setDocumentsOpenInNewTab}
+        onDocumentsBasePathChange={setDocumentsBasePath}
+        onDocumentsEditorFontChange={setDocumentsEditorFont}
         onSaveTranscriptionSettings={handleSaveTranscriptionSettings}
       />
     );
@@ -2246,7 +2323,14 @@ function App() {
             onDuplicateItem={handleDuplicateDocumentItem}
             onCopyPath={handleCopyDocumentPath}
             onRenameItem={handleRenameDocumentItem}
+            onInlineRenameItem={handleInlineRenameDocumentItem}
             onDeleteItem={handleDeleteDocumentItem}
+            onClearSelection={() =>
+              setSelectedSidebarItems((current) => ({
+                ...current,
+                documents: ""
+              }))
+            }
             onMoveItem={handleMoveDocumentItem}
           />
         ) : (
@@ -2327,6 +2411,20 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

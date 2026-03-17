@@ -33,15 +33,19 @@ interface DocumentsSidebarProps {
   selectedItemId?: string;
   onSelectItem: (itemId: string) => void;
   onOpenNote: (itemId: string) => void;
-  onCreateNote: (parentFolderId?: string) => void;
-  onCreateFolder: (parentFolderId?: string) => void;
+  onCreateNote: (parentFolderId?: string) => DocumentTreeItem;
+  onCreateFolder: (parentFolderId?: string) => DocumentTreeItem;
   onOpenInNewTab: (itemId: string) => void;
   onDuplicateItem: (itemId: string) => void;
   onCopyPath: (itemId: string) => void;
   onRenameItem: (itemId: string) => void;
+  onInlineRenameItem: (itemId: string, nextLabel: string) => void;
   onDeleteItem: (itemId: string) => void;
-  onMoveItem: (itemId: string, targetFolderId: string) => void;
+  onClearSelection: () => void;
+  onMoveItem: (itemId: string, targetFolderId: string | null) => void;
 }
+
+const ROOT_DROP_TARGET = "__documents-root__";
 
 interface ContextMenuState {
   itemId: string;
@@ -66,7 +70,14 @@ function collectExpandableIds(items: DocumentTreeItem[]): string[] {
 function sortTree(items: DocumentTreeItem[], asc: boolean): DocumentTreeItem[] {
   const direction = asc ? 1 : -1;
   return [...items]
-    .sort((a, b) => a.label.localeCompare(b.label) * direction)
+    .sort((a, b) => {
+      const folderOrder = Number(isFolder(b)) - Number(isFolder(a));
+      if (folderOrder !== 0) {
+        return folderOrder;
+      }
+
+      return a.label.localeCompare(b.label) * direction;
+    })
     .map((item) => ({
       ...item,
       children: item.children ? sortTree(item.children, asc) : undefined
@@ -142,7 +153,9 @@ export function DocumentsSidebar({
   onDuplicateItem,
   onCopyPath,
   onRenameItem,
+  onInlineRenameItem,
   onDeleteItem,
+  onClearSelection,
   onMoveItem
 }: DocumentsSidebarProps) {
   const [sortAscending, setSortAscending] = useState(true);
@@ -150,12 +163,16 @@ export function DocumentsSidebar({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
   const [dropTargetFolderId, setDropTargetFolderId] = useState<string | null>(null);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
 
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const expandTimerRef = useRef<number | null>(null);
   const expandTimerTargetRef = useRef<string | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const dragJustEndedRef = useRef(false);
+  const inlineEditInputRef = useRef<HTMLInputElement | null>(null);
+  const clickTimerRef = useRef<number | null>(null);
 
   const expandableIds = useMemo(() => collectExpandableIds(folders), [folders]);
   const visibleTree = useMemo(() => sortTree(folders, sortAscending), [folders, sortAscending]);
@@ -204,6 +221,12 @@ export function DocumentsSidebar({
 
   const resolveFolderDropTargetAtPoint = (clientX: number, clientY: number, sourceItemId: string) => {
     const elementAtPoint = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+
+    const rootDropElement = elementAtPoint?.closest<HTMLElement>("[data-doc-root-drop='true']");
+    if (rootDropElement) {
+      return ROOT_DROP_TARGET;
+    }
+
     const rowElement = elementAtPoint?.closest<HTMLButtonElement>("[data-doc-tree-row='true']");
 
     if (!rowElement) {
@@ -217,6 +240,49 @@ export function DocumentsSidebar({
 
     return targetFolderId;
   };
+
+  const cancelInlineRename = () => {
+    setEditingItemId(null);
+    setEditingValue("");
+  };
+
+  const beginInlineRename = (item: DocumentTreeItem) => {
+    setContextMenu(null);
+    setEditingItemId(item.id);
+    setEditingValue(item.label);
+  };
+
+  const beginInlineRenameForCreatedItem = (item: DocumentTreeItem) => {
+    onSelectItem(item.id);
+    beginInlineRename(item);
+  };
+
+  const commitInlineRename = (item: DocumentTreeItem) => {
+    const nextLabel = editingValue.trim();
+    if (nextLabel && nextLabel !== item.label) {
+      onInlineRenameItem(item.id, nextLabel);
+    }
+
+    cancelInlineRename();
+  };
+
+  useEffect(() => {
+    if (!editingItemId) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const input = inlineEditInputRef.current;
+      if (!input) {
+        return;
+      }
+
+      input.focus();
+      input.select();
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [editingItemId]);
 
   useEffect(() => {
     if (!selectedItemId) {
@@ -274,6 +340,10 @@ export function DocumentsSidebar({
     return () => {
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
+      if (clickTimerRef.current !== null) {
+        window.clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = null;
+      }
       clearExpandTimer();
     };
   }, []);
@@ -306,9 +376,9 @@ export function DocumentsSidebar({
     if (actionId === "open-in-new-tab") {
       onOpenInNewTab(targetId);
     } else if (actionId === "new-note") {
-      onCreateNote(targetId);
+      beginInlineRenameForCreatedItem(onCreateNote(targetId));
     } else if (actionId === "new-subfolder") {
-      onCreateFolder(targetId);
+      beginInlineRenameForCreatedItem(onCreateFolder(targetId));
     } else if (actionId === "create-copy") {
       onDuplicateItem(targetId);
     } else if (actionId === "copy-path") {
@@ -328,8 +398,9 @@ export function DocumentsSidebar({
         {items.map((item) => {
           const isFolderItem = isFolder(item);
           const hasChildren = isFolderItem && Boolean(item.children?.length);
-          const isExpanded = hasChildren && expandedIds.has(item.id);
+          const isExpanded = isFolderItem && expandedIds.has(item.id);
           const isActive = item.id === selectedItemId;
+          const isEditing = editingItemId === item.id;
           const rowDropFolderId = isFolderItem ? item.id : parentFolderId;
           const isDropTarget = rowDropFolderId !== null && dropTargetFolderId === rowDropFolderId;
           const isDragging = draggingItemId === item.id;
@@ -338,13 +409,14 @@ export function DocumentsSidebar({
             "documents-tree-row",
             isActive ? "active" : "",
             isDropTarget ? "drop-target" : "",
-            isDragging ? "dragging" : ""
+            isDragging ? "dragging" : "",
+            isEditing ? "editing" : ""
           ]
             .filter(Boolean)
             .join(" ");
 
           const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-            if (event.button !== 0) {
+            if (event.button !== 0 || editingItemId) {
               return;
             }
 
@@ -393,7 +465,7 @@ export function DocumentsSidebar({
               hoveredFolderId = nextFolderId;
               setDropTargetFolderId(nextFolderId);
 
-              if (nextFolderId) {
+              if (nextFolderId && nextFolderId !== ROOT_DROP_TARGET) {
                 queueExpandFolder(nextFolderId);
               } else {
                 clearExpandTimer();
@@ -409,7 +481,10 @@ export function DocumentsSidebar({
                 dragJustEndedRef.current = true;
 
                 if (hoveredFolderId && hoveredFolderId !== sourceItemId) {
-                  onMoveItem(sourceItemId, hoveredFolderId);
+                  onMoveItem(
+                    sourceItemId,
+                    hoveredFolderId === ROOT_DROP_TARGET ? null : hoveredFolderId
+                  );
                 }
               }
 
@@ -438,16 +513,43 @@ export function DocumentsSidebar({
                     return;
                   }
 
-                  onSelectItem(item.id);
-                  if (isFolderItem) {
-                    toggleExpanded(item.id);
+                  if (isEditing) {
                     return;
                   }
 
-                  onOpenNote(item.id);
+                  if (clickTimerRef.current !== null) {
+                    window.clearTimeout(clickTimerRef.current);
+                  }
+
+                  clickTimerRef.current = window.setTimeout(() => {
+                    clickTimerRef.current = null;
+
+                    onSelectItem(item.id);
+                    if (isFolderItem) {
+                      toggleExpanded(item.id);
+                      return;
+                    }
+
+                    onOpenNote(item.id);
+                  }, 180);
+                }}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+
+                  if (clickTimerRef.current !== null) {
+                    window.clearTimeout(clickTimerRef.current);
+                    clickTimerRef.current = null;
+                  }
+
+                  beginInlineRename(item);
                 }}
                 onContextMenu={(event) => {
                   event.preventDefault();
+                  if (isEditing) {
+                    return;
+                  }
+
                   onSelectItem(item.id);
                   setContextMenu({
                     itemId: item.id,
@@ -457,12 +559,37 @@ export function DocumentsSidebar({
                 }}
               >
                 <span className="documents-tree-caret" aria-hidden="true">
-                  {hasChildren ? isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon /> : null}
+                  {isFolderItem ? isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon /> : null}
                 </span>
-                <span className="documents-tree-label">{item.label}</span>
+
+                {isEditing ? (
+                  <input
+                    ref={inlineEditInputRef}
+                    className="documents-tree-inline-input"
+                    value={editingValue}
+                    onChange={(event) => setEditingValue(event.target.value)}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
+                    onBlur={() => commitInlineRename(item)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commitInlineRename(item);
+                        return;
+                      }
+
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        cancelInlineRename();
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className="documents-tree-label">{item.label}</span>
+                )}
               </button>
 
-              {hasChildren && isExpanded ? renderTree(item.children ?? [], depth + 1, item.id) : null}
+              {isFolderItem && isExpanded ? renderTree(item.children ?? [], depth + 1, item.id) : null}
             </li>
           );
         })}
@@ -483,7 +610,7 @@ export function DocumentsSidebar({
               className="documents-sidebar-action"
               title="New note"
               aria-label="New note"
-              onClick={() => onCreateNote()}
+              onClick={() => beginInlineRenameForCreatedItem(onCreateNote())}
             >
               <NewNoteIcon />
             </button>
@@ -492,7 +619,7 @@ export function DocumentsSidebar({
               className="documents-sidebar-action"
               title="New folder"
               aria-label="New folder"
-              onClick={() => onCreateFolder()}
+              onClick={() => beginInlineRenameForCreatedItem(onCreateFolder())}
             >
               <NewFolderIcon />
             </button>
@@ -525,7 +652,33 @@ export function DocumentsSidebar({
             </button>
           </div>
 
-          <div className="documents-sidebar-content">{renderTree(visibleTree)}</div>
+          <div
+            className="documents-sidebar-content"
+            onMouseDown={(event) => {
+              if (event.target !== event.currentTarget) {
+                return;
+              }
+
+              onClearSelection();
+              setContextMenu(null);
+              if (editingItemId) {
+                cancelInlineRename();
+              }
+            }}
+          >
+            {renderTree(visibleTree)}
+            <div
+              className={[
+                "documents-tree-root-drop-zone",
+                draggingItemId ? "drag-active" : "",
+                dropTargetFolderId === ROOT_DROP_TARGET ? "drop-target" : ""
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              data-doc-root-drop="true"
+              aria-hidden="true"
+            />
+          </div>
 
           {contextMenu && contextItem ? (
             <div
@@ -556,5 +709,15 @@ export function DocumentsSidebar({
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
+
 
 
