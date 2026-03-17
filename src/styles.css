@@ -33,6 +33,8 @@
   --font-size-md: 13px;
   --font-size-lg: 15px;
   --font-size-xl: 17px;
+  --app-font-family: "Switzer", "IBM Plex Sans", "Segoe UI", sans-serif;
+  --documents-editor-font-family: "Switzer", "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -67,7 +69,7 @@ body,
 body {
   background: var(--app-bg);
   color: var(--text-primary);
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-family: var(--app-font-family);
   font-size: var(--font-size-md);
   line-height: 1.35;
 }
@@ -654,6 +656,17 @@ table {
   z-index: 1;
 }
 
+.workspace-tab.has-separator-after .workspace-tab-inner::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  right: -1px;
+  width: 1px;
+  background: var(--border-color);
+  pointer-events: none;
+}
+
 .workspace-tab:hover {
   background: transparent;
 }
@@ -871,10 +884,20 @@ table {
   height: auto;
   overflow: visible;
   padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 60px);
+  font-family: var(--documents-editor-font-family);
   font-size: var(--font-size-md);
   line-height: 1.5;
 }
 
+
+.documents-editor-root .milkdown .ProseMirror h1,
+.documents-editor-root .milkdown .ProseMirror h2,
+.documents-editor-root .milkdown .ProseMirror h3,
+.documents-editor-root .milkdown .ProseMirror h4,
+.documents-editor-root .milkdown .ProseMirror h5,
+.documents-editor-root .milkdown .ProseMirror h6 {
+  font-family: var(--documents-editor-font-family);
+}
 .documents-preview-scroll {
   height: 100%;
   overflow: auto;
@@ -972,14 +995,15 @@ table {
 
 .documents-pane-toggle {
   height: 28px;
+  min-width: 28px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   background: var(--panel-bg-secondary);
   color: var(--text-primary);
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 0 8px;
+  justify-content: center;
+  padding: 0;
   cursor: pointer;
 }
 
@@ -987,18 +1011,16 @@ table {
   background: var(--hover-bg);
 }
 
-.documents-pane-toggle-icon {
-  width: 14px;
-  height: 14px;
-  color: var(--text-muted);
+.documents-pane-toggle-chevron-glyph {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-.documents-pane-toggle-icon svg {
-  width: 14px;
-  height: 14px;
+  width: 100%;
+  height: 100%;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-muted);
 }
 
 .pane-block {
@@ -1154,7 +1176,7 @@ table {
   color: var(--text-primary);
   padding: 0 10px;
   font-size: var(--font-size-sm);
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: var(--app-font-family);
 }
 
 .settings-text-input:focus-visible {
@@ -1538,6 +1560,22 @@ table {
   background: var(--hover-bg);
 }
 
+
+.documents-tree-root-drop-zone {
+  min-height: 40px;
+  margin-top: 1px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.documents-tree-root-drop-zone.drag-active {
+  flex: 1 0 40px;
+}
+
+.documents-tree-root-drop-zone.drop-target {
+  background: var(--hover-bg);
+}
 .documents-tree-row.active {
   background: var(--selected-bg);
   border-color: var(--border-color);
@@ -1554,8 +1592,8 @@ table {
 }
 
 .documents-tree-caret svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 
 .documents-tree-label {
@@ -1565,6 +1603,24 @@ table {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.documents-tree-row.editing {
+  background: var(--selected-bg);
+}
+
+.documents-tree-inline-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--accent-color);
+  border-radius: 8px;
+  background: var(--panel-bg-primary);
+  color: var(--text-primary);
+  padding: 0 8px;
+  font-size: var(--font-size-md);
+  font-weight: 450;
+  outline: none;
 }
 
 .documents-context-menu {
@@ -1908,3 +1964,17 @@ table {
     grid-template-columns: 1fr;
   }
 }
+
+.documents-runtime-warning {
+  margin: 0 var(--space-3);
+  font-size: var(--font-size-xs);
+}
+
+.documents-loading {
+  margin: var(--space-3);
+}
+
+
+
+
+

@@ -156,12 +156,16 @@ export function WorkspaceTabs({
     <div className="workspace-tabs" onMouseDown={startWindowDrag}>
       <div className="workspace-tabs-main">
         <div className="workspace-tabs-list" role="tablist" aria-label="Workspace tabs">
-          {tabs.map((tab) => {
+          {tabs.map((tab, index) => {
+            const nextTab = tabs[index + 1];
+            const hasSeparatorAfter =
+              tab.id !== activeTabId && nextTab !== undefined && nextTab.id !== activeTabId;
             const isDropTarget = dropTarget?.tabId === tab.id;
             const isDragging = pointerDrag?.active && pointerDrag.tabId === tab.id;
             const className = [
               "workspace-tab",
               tab.id === activeTabId ? "active" : "",
+              hasSeparatorAfter ? "has-separator-after" : "",
               isDragging ? "dragging" : "",
               isDropTarget && dropTarget?.placement === "before" ? "drop-before" : "",
               isDropTarget && dropTarget?.placement === "after" ? "drop-after" : ""

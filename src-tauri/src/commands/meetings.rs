@@ -218,9 +218,24 @@ pub fn stop_recording(
 }
 
 #[tauri::command]
-pub fn list_meeting_runs(request: WorkspaceRequest) -> Result<Vec<MeetingRunRecord>, String> {
-    store::list_runs(Path::new(&request.workspace_root), &request.workspace_id)
-        .map_err(|error| error.to_string())
+pub fn list_meeting_runs(
+    request: WorkspaceRequest,
+    state: tauri::State<'_, MeetingRuntimeState>,
+) -> Result<Vec<MeetingRunRecord>, String> {
+    let active_recording_run_ids = state
+        .recording_sessions
+        .lock()
+        .map_err(|_| "Failed to access active recording sessions.".to_string())?
+        .keys()
+        .cloned()
+        .collect();
+
+    store::list_runs_with_active_recordings(
+        Path::new(&request.workspace_root),
+        &request.workspace_id,
+        &active_recording_run_ids,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

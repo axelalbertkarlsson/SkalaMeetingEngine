@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -92,6 +93,14 @@ pub fn load_run(workspace_root: &Path, run_id: &str) -> Result<MeetingRunRecord>
 }
 
 pub fn list_runs(workspace_root: &Path, workspace_id: &str) -> Result<Vec<MeetingRunRecord>> {
+    list_runs_with_active_recordings(workspace_root, workspace_id, &HashSet::new())
+}
+
+pub fn list_runs_with_active_recordings(
+    workspace_root: &Path,
+    workspace_id: &str,
+    active_recording_run_ids: &HashSet<String>,
+) -> Result<Vec<MeetingRunRecord>> {
     ensure_workspace_dirs(workspace_root)?;
     let mut runs = Vec::new();
 
@@ -107,8 +116,19 @@ pub fn list_runs(workspace_root: &Path, workspace_id: &str) -> Result<Vec<Meetin
         }
 
         let contents = fs::read_to_string(&manifest_path)?;
-        let run: MeetingRunRecord = serde_json::from_str(&contents)?;
+        let mut run: MeetingRunRecord = serde_json::from_str(&contents)?;
         if run.workspace_id == workspace_id {
+            if run.status == MeetingRunStatus::Capturing
+                && !active_recording_run_ids.contains(&run.id)
+            {
+                run.summary = Some("Recording interrupted before completion.".to_string());
+                set_failed(
+                    &mut run,
+                    "Recording is no longer active. Start a new recording to continue.",
+                );
+                run.progress_label = Some("Recording interrupted".to_string());
+                save_run(&run)?;
+            }
             runs.push(run);
         }
     }
@@ -179,6 +199,7 @@ pub fn set_needs_review(run: &mut MeetingRunRecord, summary: impl Into<String>) 
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         env, fs,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -240,5 +261,54 @@ mod tests {
             write_input_bytes(&workspace_root, &run.id, "meeting?.wav", &[1, 2, 3]).unwrap();
         assert!(input_path.exists());
         assert_eq!(fs::read(input_path).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn marks_stale_capturing_runs_as_failed_when_not_active() {
+        let workspace_root = temp_workspace();
+        let run = create_run(
+            "ws-01",
+            &workspace_root,
+            "Interrupted capture",
+            MeetingRunType::MeetingRecording,
+            MeetingRunStatus::Capturing,
+            RecordingSource::Microphone,
+        )
+        .unwrap();
+
+        let runs =
+            list_runs_with_active_recordings(&workspace_root, "ws-01", &HashSet::new()).unwrap();
+        let refreshed = runs.into_iter().find(|item| item.id == run.id).unwrap();
+
+        assert_eq!(refreshed.status, MeetingRunStatus::Failed);
+        assert_eq!(
+            refreshed.progress_label.as_deref(),
+            Some("Recording interrupted")
+        );
+        assert_eq!(
+            refreshed.summary.as_deref(),
+            Some("Recording interrupted before completion.")
+        );
+    }
+
+    #[test]
+    fn keeps_active_capturing_runs_when_session_is_known() {
+        let workspace_root = temp_workspace();
+        let run = create_run(
+            "ws-01",
+            &workspace_root,
+            "Live capture",
+            MeetingRunType::MeetingRecording,
+            MeetingRunStatus::Capturing,
+            RecordingSource::Microphone,
+        )
+        .unwrap();
+
+        let active_run_ids = HashSet::from([run.id.clone()]);
+        let runs =
+            list_runs_with_active_recordings(&workspace_root, "ws-01", &active_run_ids).unwrap();
+        let refreshed = runs.into_iter().find(|item| item.id == run.id).unwrap();
+
+        assert_eq!(refreshed.status, MeetingRunStatus::Capturing);
     }
 }

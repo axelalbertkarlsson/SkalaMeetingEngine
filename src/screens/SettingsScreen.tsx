@@ -3,6 +3,8 @@ import { PaneHeader } from "../components/shell/PaneHeader";
 import type { Workspace } from "../models/workspace";
 import type { TranscriptionSettings } from "../lib/meetingApi";
 
+type DocumentsEditorFont = "ibm-plex-sans" | "switzer";
+
 interface SettingsScreenProps {
   workspace: Workspace;
   selectedCategory: string;
@@ -10,12 +12,16 @@ interface SettingsScreenProps {
   codexDisableAltScreen: boolean;
   codexCaptureDebugBundle: boolean;
   documentsOpenInNewTab: boolean;
+  documentsBasePath: string;
+  documentsEditorFont: DocumentsEditorFont;
   transcriptionSettings: TranscriptionSettings;
   transcriptionStatusMessage: string | null;
   onCodexCommandPathChange: (value: string) => void;
   onCodexDisableAltScreenChange: (value: boolean) => void;
   onCodexCaptureDebugBundleChange: (value: boolean) => void;
   onDocumentsOpenInNewTabChange: (value: boolean) => void;
+  onDocumentsBasePathChange: (value: string) => void;
+  onDocumentsEditorFontChange: (value: DocumentsEditorFont) => void;
   onSaveTranscriptionSettings: (settings: TranscriptionSettings) => Promise<void>;
 }
 
@@ -34,15 +40,20 @@ export function SettingsScreen({
   codexDisableAltScreen,
   codexCaptureDebugBundle,
   documentsOpenInNewTab,
+  documentsBasePath,
+  documentsEditorFont,
   transcriptionSettings,
   transcriptionStatusMessage,
   onCodexCommandPathChange,
   onCodexDisableAltScreenChange,
   onCodexCaptureDebugBundleChange,
   onDocumentsOpenInNewTabChange,
+  onDocumentsBasePathChange,
+  onDocumentsEditorFontChange,
   onSaveTranscriptionSettings
 }: SettingsScreenProps) {
   const [draftCodexPath, setDraftCodexPath] = useState(codexCommandPath);
+  const [draftDocumentsBasePath, setDraftDocumentsBasePath] = useState(documentsBasePath);
   const [draftTranscriptionSettings, setDraftTranscriptionSettings] =
     useState<TranscriptionSettings>(transcriptionSettings);
   const [savingTranscription, setSavingTranscription] = useState(false);
@@ -50,6 +61,10 @@ export function SettingsScreen({
   useEffect(() => {
     setDraftCodexPath(codexCommandPath);
   }, [codexCommandPath]);
+
+  useEffect(() => {
+    setDraftDocumentsBasePath(documentsBasePath);
+  }, [documentsBasePath]);
 
   useEffect(() => {
     setDraftTranscriptionSettings(transcriptionSettings);
@@ -73,6 +88,14 @@ export function SettingsScreen({
         {
           label: "Documents note click",
           value: documentsOpenInNewTab ? "Open in new tab" : "Open in current tab"
+        },
+        {
+          label: "Documents base path",
+          value: documentsBasePath.trim() || "Default (AppData)"
+        },
+        {
+          label: "Documents editor font",
+          value: documentsEditorFont === "switzer" ? "Switzer" : "IBM Plex Sans"
         }
       ]
     },
@@ -317,6 +340,63 @@ export function SettingsScreen({
             <p className="muted settings-help-copy">
               Turn this off to reuse the current tab instead of opening a new one.
             </p>
+          </div>
+
+          <div className="settings-toggle-row">
+            <label className="settings-toggle-label" htmlFor="documents-base-path">
+              Documents base path
+            </label>
+            <p className="muted settings-help-copy">
+              Folder where note <code>.md</code> files are stored. Leave empty to use the default app data path.
+            </p>
+            <div className="settings-input-row">
+              <input
+                id="documents-base-path"
+                className="settings-text-input"
+                type="text"
+                value={draftDocumentsBasePath}
+                onChange={(event) => setDraftDocumentsBasePath(event.target.value)}
+                placeholder="C:/Users/AxelKarlsson/Documents/SkalaNotes"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="codex-terminal-button"
+                onClick={() => onDocumentsBasePathChange(draftDocumentsBasePath.trim())}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                className="settings-path-button"
+                onClick={() => {
+                  setDraftDocumentsBasePath("");
+                  onDocumentsBasePathChange("");
+                }}
+              >
+                Use default
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-toggle-row">
+            <label className="settings-toggle-label" htmlFor="documents-editor-font">
+              Documents editor font
+            </label>
+            <p className="muted settings-help-copy">
+              Font used in the Milkdown editor pane for writing markdown notes.
+            </p>
+            <div className="settings-input-row">
+              <select
+                id="documents-editor-font"
+                className="settings-text-input"
+                value={documentsEditorFont}
+                onChange={(event) => onDocumentsEditorFontChange(event.target.value as DocumentsEditorFont)}
+              >
+                <option value="ibm-plex-sans">IBM Plex Sans</option>
+                <option value="switzer">Switzer</option>
+              </select>
+            </div>
           </div>
         </article>
       )}
