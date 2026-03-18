@@ -11,6 +11,11 @@ pub fn run() {
             commands::meetings::stop_recording,
             commands::meetings::list_meeting_runs,
             commands::meetings::get_meeting_run,
+            commands::meetings::read_meeting_artifact,
+            commands::meetings::delete_meeting_transcripts,
+            commands::meetings::delete_meeting_run,
+            commands::meetings::retranscribe_meeting_run,
+            commands::meetings::open_meeting_artifact_location,
             commands::meetings::retry_meeting_run,
             commands::meetings::get_transcription_settings,
             commands::meetings::save_transcription_settings,
@@ -25,7 +30,10 @@ pub fn run() {
             commands::documents::documents_read_note,
             commands::documents::documents_write_note,
             commands::documents::documents_delete_note,
-            commands::documents::documents_copy_note
+            commands::documents::documents_copy_note,
+            commands::spellcheck::spellcheck_load_personal_dictionary,
+            commands::spellcheck::spellcheck_add_personal_word,
+            commands::spellcheck::spellcheck_remove_personal_word
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Skala Meeting Engine");

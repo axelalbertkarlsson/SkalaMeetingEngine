@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
-import { editorViewCtx } from "@milkdown/core";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { editorViewCtx, prosePluginsCtx } from "@milkdown/core";
 import { Crepe } from "@milkdown/crepe";
 import "@milkdown/crepe/theme/common/style.css";
 import { Fragment, type Node as ProseMirrorNode } from "@milkdown/prose/model";
@@ -7,6 +8,11 @@ import { NodeSelection, TextSelection } from "@milkdown/prose/state";
 import type { EditorView } from "@milkdown/prose/view";
 import { listener, listenerCtx } from "@milkdown/plugin-listener";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
+import { createSpellcheckPlugin, clearSpellcheckDecorations, getSpellcheckRangeAtPos, updateSpellcheckDecorations } from "../../lib/spellcheck/spellcheckPlugin";
+import { collectSpellcheckTokens } from "../../lib/spellcheck/spellcheckTokenizer";
+import { SpellcheckWorkerClient } from "../../lib/spellcheck/spellcheckWorkerClient";
+import type { PersonalDictionary, SpellcheckRange } from "../../models/spellcheck";
+import { addPersonalDictionaryWord, loadPersonalDictionary } from "../../services/spellcheckDictionaryStore";
 
 interface MilkdownEditorProps {
   value: string;
@@ -18,6 +24,34 @@ interface MilkdownEditorInnerProps {
   value: string;
   onChange: (markdown: string) => void;
   className?: string;
+}
+
+interface SpellcheckContextMenuState {
+  x: number;
+  y: number;
+  range: SpellcheckRange;
+}
+
+function createEmptyPersonalDictionary(): PersonalDictionary {
+  return {
+    version: 1,
+    words: []
+  };
+}
+
+function applySuggestionCase(originalWord: string, suggestion: string) {
+  if (originalWord === originalWord.toUpperCase()) {
+    return suggestion.toUpperCase();
+  }
+
+  const [firstCharacter = "", ...restCharacters] = originalWord;
+  const rest = restCharacters.join("");
+
+  if (firstCharacter === firstCharacter.toUpperCase() && rest === rest.toLowerCase()) {
+    return suggestion.charAt(0).toUpperCase() + suggestion.slice(1);
+  }
+
+  return suggestion;
 }
 
 function posAtChildIndex(doc: ProseMirrorNode, index: number): number {
@@ -168,6 +202,42 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
   const initialValueRef = useRef(value);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const crepeRef = useRef<Crepe | null>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const spellcheckWorkerRef = useRef<SpellcheckWorkerClient | null>(null);
+  const spellcheckTimeoutRef = useRef<number | null>(null);
+  const spellcheckDocVersionRef = useRef(0);
+  const personalDictionaryRef = useRef<PersonalDictionary>(createEmptyPersonalDictionary());
+  const spellcheckMenuRef = useRef<HTMLDivElement | null>(null);
+  const [spellcheckMenu, setSpellcheckMenu] = useState<SpellcheckContextMenuState | null>(null);
+
+  const closeSpellcheckMenu = () => {
+    setSpellcheckMenu(null);
+  };
+
+  const scheduleSpellcheck = (doc: ProseMirrorNode) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (spellcheckTimeoutRef.current !== null) {
+      window.clearTimeout(spellcheckTimeoutRef.current);
+    }
+
+    spellcheckTimeoutRef.current = window.setTimeout(() => {
+      spellcheckTimeoutRef.current = null;
+
+      const worker = spellcheckWorkerRef.current;
+      const view = editorViewRef.current;
+      if (!worker || !view) {
+        return;
+      }
+
+      const tokens = collectSpellcheckTokens(doc);
+      const docVersion = spellcheckDocVersionRef.current + 1;
+      spellcheckDocVersionRef.current = docVersion;
+      worker.checkTokens(docVersion, tokens);
+    }, 250);
+  };
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -189,12 +259,96 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
     crepeRef.current = crepe;
 
     crepe.editor.use(listener).config((ctx) => {
-      ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
-        onChangeRef.current(markdown);
-      });
+      ctx.update(prosePluginsCtx, (plugins) => plugins.concat(createSpellcheckPlugin()));
+
+      const listeners = ctx.get(listenerCtx);
+      listeners
+        .mounted((mountedCtx) => {
+          const view = mountedCtx.get(editorViewCtx);
+          editorViewRef.current = view;
+          view.dom.spellcheck = false;
+          view.dom.setAttribute("spellcheck", "false");
+          scheduleSpellcheck(view.state.doc);
+        })
+        .updated((updatedCtx, doc) => {
+          editorViewRef.current = updatedCtx.get(editorViewCtx);
+          scheduleSpellcheck(doc);
+        })
+        .markdownUpdated((_ctx, markdown) => {
+          onChangeRef.current(markdown);
+        })
+        .destroy(() => {
+          editorViewRef.current = null;
+          closeSpellcheckMenu();
+        });
     });
 
     return crepe;
+  }, []);
+
+  useEffect(() => {
+    const worker = new SpellcheckWorkerClient((update) => {
+      if (update.docVersion !== spellcheckDocVersionRef.current) {
+        return;
+      }
+
+      const view = editorViewRef.current;
+      if (!view) {
+        return;
+      }
+
+      updateSpellcheckDecorations(view, update.ranges);
+      setSpellcheckMenu((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const matchingRange = update.ranges.find(
+          (range) => range.from === current.range.from && range.to === current.range.to && range.word === current.range.word
+        );
+
+        if (!matchingRange) {
+          return null;
+        }
+
+        return {
+          ...current,
+          range: matchingRange
+        };
+      });
+    });
+
+    spellcheckWorkerRef.current = worker;
+    worker.setPersonalDictionary(personalDictionaryRef.current.words);
+
+    void loadPersonalDictionary()
+      .then((dictionary) => {
+        personalDictionaryRef.current = dictionary;
+        worker.setPersonalDictionary(dictionary.words);
+
+        const view = editorViewRef.current;
+        if (view) {
+          scheduleSpellcheck(view.state.doc);
+        }
+      })
+      .catch((error) => {
+        console.error("[spellcheck] Failed to initialize dictionary", error);
+      });
+
+    return () => {
+      if (spellcheckTimeoutRef.current !== null) {
+        window.clearTimeout(spellcheckTimeoutRef.current);
+        spellcheckTimeoutRef.current = null;
+      }
+
+      const view = editorViewRef.current;
+      if (view) {
+        clearSpellcheckDecorations(view);
+      }
+
+      spellcheckWorkerRef.current = null;
+      worker.dispose();
+    };
   }, []);
 
   useEffect(() => {
@@ -255,7 +409,9 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
         return null;
       }
 
-      return crepe.editor.ctx.get(editorViewCtx);
+      const view = crepe.editor.ctx.get(editorViewCtx);
+      editorViewRef.current = view;
+      return view;
     };
 
     let dragging = false;
@@ -456,13 +612,183 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
     };
   }, []);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const onContextMenu = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || !container.contains(target)) {
+        closeSpellcheckMenu();
+        return;
+      }
+
+      const view = editorViewRef.current;
+      if (!view) {
+        closeSpellcheckMenu();
+        return;
+      }
+
+      const resolvedPosition = view.posAtCoords({
+        left: event.clientX,
+        top: event.clientY
+      });
+
+      if (!resolvedPosition) {
+        closeSpellcheckMenu();
+        return;
+      }
+
+      const range = getSpellcheckRangeAtPos(view.state, resolvedPosition.pos);
+      if (!range) {
+        closeSpellcheckMenu();
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      setSpellcheckMenu({
+        x: event.clientX,
+        y: event.clientY,
+        range
+      });
+    };
+
+    container.addEventListener("contextmenu", onContextMenu);
+    return () => {
+      container.removeEventListener("contextmenu", onContextMenu);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!spellcheckMenu) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && spellcheckMenuRef.current?.contains(target)) {
+        return;
+      }
+
+      closeSpellcheckMenu();
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeSpellcheckMenu();
+      }
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [spellcheckMenu]);
+
+  const replaceMisspelledWord = (range: SpellcheckRange, suggestion: string) => {
+    const view = editorViewRef.current;
+    if (!view) {
+      return;
+    }
+
+    const replacement = applySuggestionCase(range.word, suggestion);
+
+    try {
+      const transaction = view.state.tr.insertText(replacement, range.from, range.to);
+      view.dispatch(transaction.scrollIntoView());
+      scheduleSpellcheck(view.state.doc);
+      view.focus();
+      closeSpellcheckMenu();
+    } catch (error) {
+      console.error("[spellcheck] Failed to replace misspelled word", { range, suggestion, error });
+    }
+  };
+
+  const addWordToDictionary = async (range: SpellcheckRange) => {
+    closeSpellcheckMenu();
+
+    try {
+      const dictionary = await addPersonalDictionaryWord(range.word);
+      personalDictionaryRef.current = dictionary;
+      spellcheckWorkerRef.current?.setPersonalDictionary(dictionary.words);
+
+      const view = editorViewRef.current;
+      if (view) {
+        scheduleSpellcheck(view.state.doc);
+      }
+    } catch (error) {
+      console.error("[spellcheck] Failed to add word to dictionary", { range, error });
+    }
+  };
+
+  const spellcheckMenuOverlay = spellcheckMenu && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          ref={spellcheckMenuRef}
+          className="documents-context-menu spellcheck-context-menu"
+          style={{
+            left: `${Math.max(8, Math.min(spellcheckMenu.x, window.innerWidth - 240))}px`,
+            top: `${Math.max(8, Math.min(spellcheckMenu.y, window.innerHeight - 240))}px`
+          }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        >
+          {spellcheckMenu.range.suggestions.length > 0 ? (
+            spellcheckMenu.range.suggestions.map((suggestion) => (
+              <button
+                key={`${spellcheckMenu.range.from}-${suggestion}`}
+                type="button"
+                className="documents-context-menu-item"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  replaceMisspelledWord(spellcheckMenu.range, suggestion);
+                }}
+              >
+                {applySuggestionCase(spellcheckMenu.range.word, suggestion)}
+              </button>
+            ))
+          ) : (
+            <button type="button" className="documents-context-menu-item" disabled>
+              No suggestions
+            </button>
+          )}
+          <div className="documents-context-menu-separator" />
+          <button
+            type="button"
+            className="documents-context-menu-item"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void addWordToDictionary(spellcheckMenu.range);
+            }}
+          >
+            Add to dictionary
+          </button>
+        </div>,
+        document.body
+      )
+    : null;
+
   return (
-    <div
-      ref={containerRef}
-      className={className ? `milkdown-editor ${className}` : "milkdown-editor"}
-    >
-      <Milkdown />
-    </div>
+    <>
+      <div
+        ref={containerRef}
+        className={className ? `milkdown-editor ${className}` : "milkdown-editor"}
+      >
+        <Milkdown />
+      </div>
+      {spellcheckMenuOverlay}
+    </>
   );
 }
 

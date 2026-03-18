@@ -179,23 +179,13 @@ fn list_audio_devices(ffmpeg_path: &str) -> Result<Vec<String>> {
         .with_context(|| format!("Failed to list devices with '{}'.", ffmpeg_path))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut devices = Vec::new();
-    let mut in_audio_section = false;
-
-    for line in stderr.lines() {
-        if line.contains("DirectShow audio devices") {
-            in_audio_section = true;
-            continue;
-        }
-        if in_audio_section {
-            if line.contains("DirectShow video devices") {
-                break;
-            }
-            if let Some(device_name) = extract_quoted_value(line) {
-                devices.push(device_name);
-            }
-        }
-    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = if stdout.is_empty() {
+        stderr.into_owned()
+    } else {
+        format!("{stderr}\n{stdout}")
+    };
+    let devices = parse_audio_devices(&combined);
 
     if devices.is_empty() {
         return Err(anyhow!(
@@ -207,6 +197,48 @@ fn list_audio_devices(ffmpeg_path: &str) -> Result<Vec<String>> {
     Ok(devices)
 }
 
+fn parse_audio_devices(output: &str) -> Vec<String> {
+    let has_explicit_audio_section = output.contains("DirectShow audio devices");
+    let mut in_audio_section = !has_explicit_audio_section;
+    let mut devices = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.contains("DirectShow audio devices") {
+            in_audio_section = true;
+            continue;
+        }
+
+        if trimmed.contains("DirectShow video devices") {
+            in_audio_section = false;
+            continue;
+        }
+
+        if !in_audio_section || trimmed.contains("Alternative name") {
+            continue;
+        }
+
+        let is_audio_device_line = if has_explicit_audio_section {
+            !trimmed.is_empty() && !trimmed.contains("DirectShow")
+        } else {
+            trimmed.contains("(audio)")
+        };
+
+        if !is_audio_device_line {
+            continue;
+        }
+
+        if let Some(device_name) = extract_quoted_value(trimmed) {
+            if !devices.contains(&device_name) {
+                devices.push(device_name);
+            }
+        }
+    }
+
+    devices
+}
+
 fn extract_quoted_value(line: &str) -> Option<String> {
     let start = line.find('"')?;
     let end = line.rfind('"')?;
@@ -215,4 +247,48 @@ fn extract_quoted_value(line: &str) -> Option<String> {
     }
 
     Some(line[start + 1..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_audio_devices;
+
+    #[test]
+    fn parses_headerless_audio_device_output() {
+        let output = r#"
+[in#0 @ 000001ce92de7f40] "Integrated Camera" (video)
+[in#0 @ 000001ce92de7f40]   Alternative name "@device_pnp_camera"
+[in#0 @ 000001ce92de7f40] "Microphone Array (AMD Audio Device)" (audio)
+[in#0 @ 000001ce92de7f40]   Alternative name "@device_cm_microphone"
+Error opening input file dummy.
+"#;
+
+        let devices = parse_audio_devices(output);
+
+        assert_eq!(devices, vec!["Microphone Array (AMD Audio Device)"]);
+    }
+
+    #[test]
+    fn parses_audio_device_output_with_explicit_sections() {
+        let output = r#"
+[dshow @ 000001] DirectShow video devices
+[dshow @ 000001]  "Integrated Camera"
+[dshow @ 000001]     Alternative name "@device_pnp_camera"
+[dshow @ 000001] DirectShow audio devices
+[dshow @ 000001]  "Microphone Array (AMD Audio Device)"
+[dshow @ 000001]     Alternative name "@device_cm_microphone"
+[dshow @ 000001]  "Stereo Mix (Realtek(R) Audio)"
+[dshow @ 000001]     Alternative name "@device_cm_stereomix"
+"#;
+
+        let devices = parse_audio_devices(output);
+
+        assert_eq!(
+            devices,
+            vec![
+                "Microphone Array (AMD Audio Device)",
+                "Stereo Mix (Realtek(R) Audio)"
+            ]
+        );
+    }
 }

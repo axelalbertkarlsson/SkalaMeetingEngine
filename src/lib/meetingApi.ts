@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { RecordingSource, Run } from "../models/run";
+import type { ArtifactKind, MeetingArtifactContent, RecordingSource, Run } from "../models/run";
 
 export interface TranscriptionSettings {
   openAiApiKey?: string;
@@ -100,14 +100,61 @@ export async function stopRecording(recordingJobId: string): Promise<void> {
   });
 }
 
-export async function retryMeetingRun(workspaceRoot: string, runId: string): Promise<Run> {
-  const run = await invoke<any>("retry_meeting_run", {
+export async function retranscribeMeetingRun(workspaceRoot: string, runId: string): Promise<Run> {
+  const run = await invoke<any>("retranscribe_meeting_run", {
     request: {
       workspaceRoot,
       runId
     }
   });
   return mapRun(run);
+}
+
+export async function readMeetingArtifact(
+  workspaceRoot: string,
+  runId: string,
+  kind: ArtifactKind
+): Promise<MeetingArtifactContent> {
+  const artifact = await invoke<any>("read_meeting_artifact", {
+    request: {
+      workspaceRoot,
+      runId,
+      kind
+    }
+  });
+
+  return {
+    kind: artifact.kind,
+    path: artifact.path,
+    content: artifact.content,
+    contentType: artifact.contentType
+  };
+}
+
+export async function deleteMeetingTranscripts(workspaceRoot: string, runId: string): Promise<void> {
+  await invoke("delete_meeting_transcripts", {
+    request: {
+      workspaceRoot,
+      runId
+    }
+  });
+}
+
+export async function deleteMeetingRun(workspaceRoot: string, runId: string): Promise<void> {
+  await invoke("delete_meeting_run", {
+    request: {
+      workspaceRoot,
+      runId
+    }
+  });
+}
+
+export async function openMeetingArtifactLocation(path: string): Promise<void> {
+  await invoke("open_meeting_artifact_location", {
+    request: {
+      path
+    }
+  });
 }
 
 export async function getTranscriptionSettings(): Promise<TranscriptionSettings> {
@@ -140,3 +187,4 @@ export async function saveTranscriptionSettings(
     diarizationEnabled: Boolean(result.diarizationEnabled)
   };
 }
+

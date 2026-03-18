@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -181,6 +182,62 @@ pub fn sanitize_file_name(file_name: &str) -> String {
         .collect()
 }
 
+pub fn transcript_artifact_kinds() -> [ArtifactKind; 3] {
+    [
+        ArtifactKind::RawTranscript,
+        ArtifactKind::CleanedTranscript,
+        ArtifactKind::ProviderResponse,
+    ]
+}
+
+pub fn is_transcript_artifact_kind(kind: &ArtifactKind) -> bool {
+    matches!(
+        kind,
+        ArtifactKind::RawTranscript
+            | ArtifactKind::CleanedTranscript
+            | ArtifactKind::ProviderResponse
+    )
+}
+
+pub fn delete_transcript_artifacts(run: &mut MeetingRunRecord) -> Result<bool> {
+    let transcript_artifacts = run
+        .artifacts
+        .iter()
+        .filter(|artifact| is_transcript_artifact_kind(&artifact.kind))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let removed_any = !transcript_artifacts.is_empty();
+
+    for artifact in &transcript_artifacts {
+        remove_file_if_exists(Path::new(&artifact.path))?;
+    }
+
+    run.artifacts
+        .retain(|artifact| !is_transcript_artifact_kind(&artifact.kind));
+    let remaining_ids = run
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.id.clone())
+        .collect::<HashSet<_>>();
+    run.artifact_ids
+        .retain(|artifact_id| remaining_ids.contains(artifact_id));
+
+    Ok(removed_any)
+}
+
+pub fn set_source_ready(run: &mut MeetingRunRecord) {
+    run.status = MeetingRunStatus::SourceReady;
+    run.summary = None;
+    run.error_message = None;
+    run.progress_label = Some("Ready to retranscribe".to_string());
+    run.ended_at = Some(now_iso());
+}
+
+pub fn delete_run(workspace_root: &Path, run_id: &str) -> Result<bool> {
+    remove_dir_if_exists(&run_root(workspace_root, run_id))
+}
+
 pub fn set_failed(run: &mut MeetingRunRecord, message: impl Into<String>) {
     run.status = MeetingRunStatus::Failed;
     run.error_message = Some(message.into());
@@ -194,6 +251,22 @@ pub fn set_needs_review(run: &mut MeetingRunRecord, summary: impl Into<String>) 
     run.error_message = None;
     run.progress_label = Some("Transcripts ready for review".to_string());
     run.ended_at = Some(now_iso());
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Failed to delete '{}'.", path.display())),
+    }
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<bool> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Failed to delete '{}'.", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +334,134 @@ mod tests {
             write_input_bytes(&workspace_root, &run.id, "meeting?.wav", &[1, 2, 3]).unwrap();
         assert!(input_path.exists());
         assert_eq!(fs::read(input_path).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn delete_run_removes_entire_run_directory() {
+        let workspace_root = temp_workspace();
+        let run = create_run(
+            "ws-01",
+            &workspace_root,
+            "Delete run",
+            MeetingRunType::MeetingRecording,
+            MeetingRunStatus::NeedsReview,
+            RecordingSource::Microphone,
+        )
+        .unwrap();
+
+        let run_path = run_root(&workspace_root, &run.id);
+        assert!(run_path.exists());
+
+        let deleted = delete_run(&workspace_root, &run.id).unwrap();
+
+        assert!(deleted);
+        assert!(!run_path.exists());
+    }
+
+    #[test]
+    fn delete_transcript_artifacts_removes_only_transcript_outputs() {
+        let workspace_root = temp_workspace();
+        let mut run = create_run(
+            "ws-01",
+            &workspace_root,
+            "Delete transcript artifacts",
+            MeetingRunType::MeetingRecording,
+            MeetingRunStatus::NeedsReview,
+            RecordingSource::Microphone,
+        )
+        .unwrap();
+
+        let recording_path = run_input_dir(&workspace_root, &run.id).join("recording.wav");
+        fs::write(&recording_path, b"audio").unwrap();
+        add_artifact(
+            &mut run,
+            ArtifactKind::RawRecording,
+            recording_path.to_string_lossy().to_string(),
+            Some("Recording output".to_string()),
+        );
+
+        let log_path = run_artifacts_dir(&workspace_root, &run.id).join("recording.log");
+        fs::write(&log_path, b"log").unwrap();
+        add_artifact(
+            &mut run,
+            ArtifactKind::TerminalLog,
+            log_path.to_string_lossy().to_string(),
+            Some("Recording log".to_string()),
+        );
+
+        let raw_path = run_artifacts_dir(&workspace_root, &run.id).join("transcript-raw.txt");
+        fs::write(&raw_path, "raw transcript").unwrap();
+        add_artifact(
+            &mut run,
+            ArtifactKind::RawTranscript,
+            raw_path.to_string_lossy().to_string(),
+            Some("Raw transcript".to_string()),
+        );
+
+        let cleaned_path =
+            run_artifacts_dir(&workspace_root, &run.id).join("transcript-cleaned.md");
+        fs::write(&cleaned_path, "# cleaned").unwrap();
+        add_artifact(
+            &mut run,
+            ArtifactKind::CleanedTranscript,
+            cleaned_path.to_string_lossy().to_string(),
+            Some("Cleaned transcript".to_string()),
+        );
+
+        let provider_path = run_artifacts_dir(&workspace_root, &run.id)
+            .join("transcription-provider-response.json");
+        fs::write(&provider_path, "{}\n").unwrap();
+        add_artifact(
+            &mut run,
+            ArtifactKind::ProviderResponse,
+            provider_path.to_string_lossy().to_string(),
+            Some("OpenAI transcription response".to_string()),
+        );
+
+        let removed_any = delete_transcript_artifacts(&mut run).unwrap();
+
+        assert!(removed_any);
+        assert!(recording_path.exists());
+        assert!(log_path.exists());
+        assert!(!raw_path.exists());
+        assert!(!cleaned_path.exists());
+        assert!(!provider_path.exists());
+        assert_eq!(run.artifacts.len(), 2);
+        assert!(run.artifacts.iter().all(|artifact| {
+            matches!(
+                artifact.kind,
+                ArtifactKind::RawRecording | ArtifactKind::TerminalLog
+            )
+        }));
+        assert_eq!(run.artifact_ids.len(), 2);
+    }
+
+    #[test]
+    fn delete_transcript_artifacts_ignores_missing_files() {
+        let workspace_root = temp_workspace();
+        let mut run = create_run(
+            "ws-01",
+            &workspace_root,
+            "Missing transcript files",
+            MeetingRunType::MeetingRecording,
+            MeetingRunStatus::NeedsReview,
+            RecordingSource::Microphone,
+        )
+        .unwrap();
+
+        let raw_path = run_artifacts_dir(&workspace_root, &run.id).join("transcript-raw.txt");
+        add_artifact(
+            &mut run,
+            ArtifactKind::RawTranscript,
+            raw_path.to_string_lossy().to_string(),
+            Some("Raw transcript".to_string()),
+        );
+
+        let removed_any = delete_transcript_artifacts(&mut run).unwrap();
+
+        assert!(removed_any);
+        assert!(run.artifacts.is_empty());
+        assert!(run.artifact_ids.is_empty());
     }
 
     #[test]
