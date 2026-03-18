@@ -13,6 +13,7 @@ pub enum MeetingRunType {
 #[serde(rename_all = "snake_case")]
 pub enum MeetingRunStatus {
     Capturing,
+    SourceReady,
     Imported,
     QueuedForTranscription,
     Transcribing,

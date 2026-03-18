@@ -38,7 +38,9 @@ import {
   getTranscriptionSettings,
   importMeetingFile,
   listMeetingRuns,
-  retryMeetingRun,
+  deleteMeetingTranscripts,
+  deleteMeetingRun,
+  retranscribeMeetingRun,
   saveTranscriptionSettings,
   startRecording,
   stopRecording,
@@ -407,6 +409,7 @@ const statusLabels: Record<RunStatus, string> = {
   queued: "Queued",
   running: "Running",
   capturing: "Capturing",
+  source_ready: "Ready to retranscribe",
   imported: "Imported",
   queued_for_transcription: "Queued for transcription",
   transcribing: "Transcribing",
@@ -420,6 +423,7 @@ const statusTone: Record<RunStatus, "neutral" | "warning" | "success" | "danger"
   queued: "neutral",
   running: "neutral",
   capturing: "neutral",
+  source_ready: "warning",
   imported: "neutral",
   queued_for_transcription: "neutral",
   transcribing: "neutral",
@@ -929,14 +933,40 @@ function App() {
     [refreshMeetingRuns]
   );
 
-  const handleRetryMeetingRun = useCallback(
+  const handleRetranscribeMeetingRun = useCallback(
     async (runId: string) => {
       try {
-        const run = await retryMeetingRun(workspace.rootPath, runId);
-        setMeetingActionMessage(`Requeued transcription for '${run.title}'.`);
+        const run = await retranscribeMeetingRun(workspace.rootPath, runId);
+        setMeetingActionMessage(`Queued transcription for '${run.title}'.`);
         await refreshMeetingRuns();
       } catch (error) {
-        setMeetingActionMessage(`Retry failed: ${String(error)}`);
+        setMeetingActionMessage(`Retranscribe failed: ${String(error)}`);
+      }
+    },
+    [refreshMeetingRuns, workspace.rootPath]
+  );
+
+  const handleDeleteMeetingTranscripts = useCallback(
+    async (runId: string) => {
+      try {
+        await deleteMeetingTranscripts(workspace.rootPath, runId);
+        setMeetingActionMessage("Deleted transcript artifacts. Recording retained.");
+        await refreshMeetingRuns();
+      } catch (error) {
+        setMeetingActionMessage(`Delete transcripts failed: ${String(error)}`);
+      }
+    },
+    [refreshMeetingRuns, workspace.rootPath]
+  );
+
+  const handleDeleteMeetingRun = useCallback(
+    async (runId: string) => {
+      try {
+        await deleteMeetingRun(workspace.rootPath, runId);
+        setMeetingActionMessage("Deleted meeting run.");
+        await refreshMeetingRuns();
+      } catch (error) {
+        setMeetingActionMessage(`Delete run failed: ${String(error)}`);
       }
     },
     [refreshMeetingRuns, workspace.rootPath]
@@ -2198,7 +2228,9 @@ function App() {
           onImportFile={handleImportMeetingFile}
           onStartRecording={handleStartMeetingRecording}
           onStopRecording={handleStopMeetingRecording}
-          onRetryRun={handleRetryMeetingRun}
+          onRetranscribeRun={handleRetranscribeMeetingRun}
+          onDeleteTranscripts={handleDeleteMeetingTranscripts}
+          onDeleteRun={handleDeleteMeetingRun}
           onRefresh={refreshMeetingRuns}
         />
       );
@@ -2411,6 +2443,13 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
 
 
 

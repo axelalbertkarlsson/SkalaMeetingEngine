@@ -9,6 +9,7 @@ export type RunStatus =
   | "queued"
   | "running"
   | "capturing"
+  | "source_ready"
   | "imported"
   | "queued_for_transcription"
   | "transcribing"
@@ -28,6 +29,7 @@ export type ArtifactKind =
   | "terminal_log";
 
 export type RecordingSource = "microphone" | "system_audio" | "mixed" | "imported_file";
+export type MeetingArtifactContentType = "markdown" | "text" | "json";
 
 export interface Artifact {
   id: string;
@@ -36,6 +38,13 @@ export interface Artifact {
   path: string;
   createdAt: string;
   label?: string;
+}
+
+export interface MeetingArtifactContent {
+  kind: ArtifactKind;
+  path: string;
+  content: string;
+  contentType: MeetingArtifactContentType;
 }
 
 export interface Run {

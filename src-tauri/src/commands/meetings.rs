@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::Mutex,
 };
 
@@ -75,6 +77,20 @@ pub struct SaveTranscriptionSettingsRequest {
     pub diarization_enabled: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingArtifactRequest {
+    pub workspace_root: String,
+    pub run_id: String,
+    pub kind: ArtifactKind,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactLocationRequest {
+    pub path: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingJobResponse {
@@ -89,6 +105,15 @@ pub struct RecordingJobResponse {
 pub struct OperationAck {
     pub ok: bool,
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingArtifactContentResponse {
+    pub kind: ArtifactKind,
+    pub path: String,
+    pub content: String,
+    pub content_type: String,
 }
 
 #[tauri::command]
@@ -245,15 +270,143 @@ pub fn get_meeting_run(request: GetMeetingRunRequest) -> Result<MeetingRunRecord
 }
 
 #[tauri::command]
-pub fn retry_meeting_run(request: RetryMeetingRunRequest) -> Result<MeetingRunRecord, String> {
+pub fn read_meeting_artifact(
+    request: MeetingArtifactRequest,
+) -> Result<MeetingArtifactContentResponse, String> {
+    let workspace_root = PathBuf::from(&request.workspace_root);
+    let run =
+        store::load_run(&workspace_root, &request.run_id).map_err(|error| error.to_string())?;
+    let artifact = run
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == request.kind)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "No artifact of kind '{:?}' exists for this run.",
+                request.kind
+            )
+        })?;
+
+    let content_type = artifact_content_type(&artifact.kind)?;
+    let raw_content = fs::read_to_string(&artifact.path)
+        .map_err(|error| format!("Failed to read '{}': {}", artifact.path, error))?;
+    let content = if content_type == "json" {
+        serde_json::from_str::<serde_json::Value>(&raw_content)
+            .map(|value| serde_json::to_string_pretty(&value).unwrap_or(raw_content.clone()))
+            .unwrap_or(raw_content)
+    } else {
+        raw_content
+    };
+
+    Ok(MeetingArtifactContentResponse {
+        kind: artifact.kind,
+        path: artifact.path,
+        content,
+        content_type: content_type.to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn delete_meeting_transcripts(request: RetryMeetingRunRequest) -> Result<OperationAck, String> {
     let workspace_root = PathBuf::from(&request.workspace_root);
     let mut run =
         store::load_run(&workspace_root, &request.run_id).map_err(|error| error.to_string())?;
-    run.error_message = None;
-    run.ended_at = None;
+
+    if is_processing_status(&run.status) {
+        return Err("Cannot delete transcripts while the run is still processing.".to_string());
+    }
+    ensure_run_has_source_media(&run)?;
+
+    let removed_any =
+        store::delete_transcript_artifacts(&mut run).map_err(|error| error.to_string())?;
+    store::set_source_ready(&mut run);
     store::save_run(&run).map_err(|error| error.to_string())?;
-    queue_transcription(&workspace_root, &run.id).map_err(|error| error.to_string())?;
-    store::load_run(&workspace_root, &run.id).map_err(|error| error.to_string())
+
+    Ok(OperationAck {
+        ok: true,
+        message: if removed_any {
+            format!(
+                "Deleted transcript artifacts for '{}'. Recording retained.",
+                run.title
+            )
+        } else {
+            format!(
+                "No transcript artifacts were present for '{}'. Recording retained.",
+                run.title
+            )
+        },
+    })
+}
+
+#[tauri::command]
+pub fn delete_meeting_run(request: RetryMeetingRunRequest) -> Result<OperationAck, String> {
+    let workspace_root = PathBuf::from(&request.workspace_root);
+    let run =
+        store::load_run(&workspace_root, &request.run_id).map_err(|error| error.to_string())?;
+
+    if is_processing_status(&run.status) {
+        return Err("Cannot delete a meeting run while it is still processing.".to_string());
+    }
+
+    let deleted = store::delete_run(&workspace_root, &run.id).map_err(|error| error.to_string())?;
+
+    Ok(OperationAck {
+        ok: true,
+        message: if deleted {
+            format!("Deleted meeting run '{}'.", run.title)
+        } else {
+            format!("Meeting run '{}' was already removed.", run.title)
+        },
+    })
+}
+
+#[tauri::command]
+pub fn retranscribe_meeting_run(
+    request: RetryMeetingRunRequest,
+) -> Result<MeetingRunRecord, String> {
+    retranscribe_run(Path::new(&request.workspace_root), &request.run_id)
+}
+
+#[tauri::command]
+pub fn open_meeting_artifact_location(
+    request: ArtifactLocationRequest,
+) -> Result<OperationAck, String> {
+    let path = PathBuf::from(&request.path);
+    if !path.exists() {
+        return Err(format!(
+            "Artifact path does not exist: '{}'",
+            path.display()
+        ));
+    }
+
+    if cfg!(target_os = "windows") {
+        let mut command = Command::new("explorer");
+        if path.is_file() {
+            command.arg("/select,").arg(&path);
+        } else {
+            command.arg(&path);
+        }
+        command.status().map_err(|error| {
+            format!(
+                "Failed to open artifact location '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+    } else {
+        return Err("Opening artifact locations is only implemented on Windows in v1.".to_string());
+    }
+
+    Ok(OperationAck {
+        ok: true,
+        message: format!("Opened artifact location for '{}'.", path.display()),
+    })
+}
+
+#[tauri::command]
+pub fn retry_meeting_run(request: RetryMeetingRunRequest) -> Result<MeetingRunRecord, String> {
+    retranscribe_run(Path::new(&request.workspace_root), &request.run_id)
 }
 
 #[tauri::command]
@@ -289,11 +442,76 @@ pub fn save_transcription_settings(
     settings::save_settings(&settings_value).map_err(|error| error.to_string())
 }
 
+fn retranscribe_run(workspace_root: &Path, run_id: &str) -> Result<MeetingRunRecord, String> {
+    let mut run = store::load_run(workspace_root, run_id).map_err(|error| error.to_string())?;
+    ensure_run_has_source_media(&run)?;
+
+    if !matches!(
+        run.status,
+        MeetingRunStatus::Failed | MeetingRunStatus::NeedsReview | MeetingRunStatus::SourceReady
+    ) {
+        return Err(format!(
+            "Run '{}' is not in a retranscribable state.",
+            run.title
+        ));
+    }
+
+    store::delete_transcript_artifacts(&mut run).map_err(|error| error.to_string())?;
+    run.summary = None;
+    run.error_message = None;
+    run.progress_label = Some("Queued for transcription".to_string());
+    run.ended_at = None;
+    store::save_run(&run).map_err(|error| error.to_string())?;
+    queue_transcription(workspace_root, &run.id).map_err(|error| error.to_string())?;
+    store::load_run(workspace_root, &run.id).map_err(|error| error.to_string())
+}
+
+fn ensure_run_has_source_media(run: &MeetingRunRecord) -> Result<(), String> {
+    let input_path = run
+        .input_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Run '{}' has no source media to reuse.", run.title))?;
+
+    let source_path = PathBuf::from(input_path);
+    if !source_path.exists() {
+        return Err(format!(
+            "Run '{}' references missing source media at '{}'.",
+            run.title,
+            source_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_processing_status(status: &MeetingRunStatus) -> bool {
+    matches!(
+        status,
+        MeetingRunStatus::Capturing
+            | MeetingRunStatus::QueuedForTranscription
+            | MeetingRunStatus::Transcribing
+            | MeetingRunStatus::Cleaning
+    )
+}
+
+fn artifact_content_type(kind: &ArtifactKind) -> Result<&'static str, String> {
+    match kind {
+        ArtifactKind::CleanedTranscript => Ok("markdown"),
+        ArtifactKind::RawTranscript | ArtifactKind::TerminalLog => Ok("text"),
+        ArtifactKind::ProviderResponse => Ok("json"),
+        _ => Err("This artifact kind is not previewable in the review panel.".to_string()),
+    }
+}
+
 fn queue_transcription(workspace_root: &Path, run_id: &str) -> anyhow::Result<()> {
     let mut run = store::load_run(workspace_root, run_id)?;
     run.status = MeetingRunStatus::QueuedForTranscription;
+    run.summary = None;
     run.error_message = None;
     run.progress_label = Some("Queued for transcription".to_string());
+    run.ended_at = None;
     store::save_run(&run)?;
     transcription::enqueue_transcription(workspace_root.to_path_buf(), run_id.to_string());
     Ok(())

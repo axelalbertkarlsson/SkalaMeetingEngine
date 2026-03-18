@@ -4,8 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "prepare:spellcheck-dictionaries": "node scripts/prepare-spellcheck-dictionaries.mjs",
+    "predev": "npm run prepare:spellcheck-dictionaries",
     "dev": "vite",
+    "prebuild": "npm run prepare:spellcheck-dictionaries",
     "build": "tsc && vite build",
+    "prepreview": "npm run prepare:spellcheck-dictionaries",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:codex-terminal": "node scripts/run-codex-terminal-tests.mjs"
@@ -17,6 +21,9 @@
     "@milkdown/react": "^7.19.0",
     "@tauri-apps/api": "^2.0.0",
     "@xterm/addon-fit": "^0.11.0",
+    "dictionary-en-us": "^2.2.1",
+    "dictionary-sv": "^4.0.0",
+    "nspell": "^2.1.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
