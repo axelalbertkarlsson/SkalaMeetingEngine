@@ -1262,6 +1262,15 @@ function App() {
           return tab;
         }
 
+        if (tab.kind === "scratch") {
+          return {
+            ...tab,
+            title: item.label,
+            kind: "document",
+            documentItemId: item.id
+          };
+        }
+
         if (tab.kind === "document") {
           return {
             ...tab,

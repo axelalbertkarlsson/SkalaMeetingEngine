@@ -620,7 +620,7 @@ export function MeetingsScreen({
 
             <div className="meeting-action-card">
               <h4>Live recording</h4>
-              <p className="muted">Windows-first FFmpeg capture. System audio depends on a loopback-capable device.</p>
+              <p className="muted">Windows-first capture. System audio uses native Windows loopback; microphone capture still uses FFmpeg.</p>
               <div className="meeting-source-grid">
                 {recordingOptions.map((option) => (
                   <button
