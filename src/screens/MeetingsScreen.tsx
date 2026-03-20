@@ -343,11 +343,11 @@ export function MeetingsScreen({
       cancelled = true;
     };
   }, [
-    artifactContentState,
-    selectedArtifact,
     selectedArtifactCacheKey,
+    selectedArtifact?.kind,
     selectedReviewTab,
-    selectedRun,
+    selectedRun?.id,
+    selectedRun?.workspaceRoot,
     workspace.rootPath
   ]);
 
