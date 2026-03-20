@@ -100,6 +100,7 @@ interface WorkspaceTabState {
   sectionId?: SectionId;
   documentItemId?: string;
   closable: boolean;
+  pinned: boolean;
 }
 
 const sectionTitles: Record<SectionId, string> = {
@@ -443,7 +444,8 @@ function createSectionTab(sectionId: SectionId): WorkspaceTabState {
     title: sectionTitles[sectionId],
     kind: "section",
     sectionId,
-    closable: true
+    closable: true,
+    pinned: false
   };
 }
 
@@ -1053,7 +1055,8 @@ function App() {
           id: `scratch-${Date.now()}`,
           title: "Scratch",
           kind: "scratch",
-          closable: true
+          closable: true,
+          pinned: false
         };
         setTabs((currentTabs) => [...currentTabs, nextTab]);
         setActiveTabId(nextTab.id);
@@ -1217,7 +1220,8 @@ function App() {
       title: item.label,
       kind: "document",
       documentItemId: item.id,
-      closable: true
+      closable: true,
+      pinned: false
     };
 
     setTabs((currentTabs) => [...currentTabs, nextTab]);
@@ -1249,7 +1253,7 @@ function App() {
       documents: item.id
     }));
 
-    if (documentsOpenInNewTab) {
+    if (documentsOpenInNewTab || activeTab.pinned) {
       openDocumentNoteInTab(item);
       return;
     }
@@ -2054,10 +2058,53 @@ function App() {
       id: `scratch-${Date.now()}`,
       title: `Scratch ${existingScratchCount + 1}`,
       kind: "scratch",
-      closable: true
+      closable: true,
+      pinned: false
     };
     setTabs((currentTabs) => [...currentTabs, nextTab]);
     setActiveTabId(nextTab.id);
+  };
+
+  const toggleTabPin = (tabId: string) => {
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) => (tab.id === tabId ? { ...tab, pinned: !tab.pinned } : tab))
+    );
+  };
+
+  const duplicateTab = (tabId: string) => {
+    setTabs((currentTabs) => {
+      const tabIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+      if (tabIndex === -1) {
+        return currentTabs;
+      }
+
+      const sourceTab = currentTabs[tabIndex];
+      const duplicate: WorkspaceTabState = {
+        ...sourceTab,
+        id:
+          sourceTab.kind === "document" && sourceTab.documentItemId
+            ? `tab-document-${sourceTab.documentItemId}-${Date.now()}`
+            : sourceTab.kind === "section" && sourceTab.sectionId
+              ? `tab-section-${sourceTab.sectionId}-${Date.now()}`
+              : `scratch-${Date.now()}`
+      };
+
+      const nextTabs = [...currentTabs];
+      nextTabs.splice(tabIndex + 1, 0, duplicate);
+      setActiveTabId(duplicate.id);
+
+      if (duplicate.kind === "section" && duplicate.sectionId) {
+        setActiveSection(duplicate.sectionId);
+      } else if (duplicate.kind === "document" && duplicate.documentItemId) {
+        setActiveSection("documents");
+        setSelectedSidebarItems((current) => ({
+          ...current,
+          documents: duplicate.documentItemId ?? current.documents
+        }));
+      }
+
+      return nextTabs;
+    });
   };
 
   const closeTab = (tabId: string) => {
@@ -2153,7 +2200,7 @@ function App() {
     document.body.style.cursor = "col-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.round(clamp(startWidth + (moveEvent.clientX - startX), 220, 360));
+      const nextWidth = Math.round(clamp(startWidth + (moveEvent.clientX - startX), 180, 360));
       setSidebarWidth(nextWidth);
     };
 
@@ -2178,7 +2225,7 @@ function App() {
     document.body.style.cursor = "col-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 260, 340));
+      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 220, 340));
       setInspectorWidth(nextWidth);
     };
 
@@ -2395,6 +2442,8 @@ function App() {
           activeTabId={activeTab.id}
           onSelectTab={selectTab}
           onCloseTab={closeTab}
+          onToggleTabPin={toggleTabPin}
+          onDuplicateTab={duplicateTab}
           onCreateTab={createScratchTab}
           onReorderTabs={reorderTabs}
         >

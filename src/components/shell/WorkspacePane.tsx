@@ -6,6 +6,8 @@ interface WorkspacePaneProps {
   activeTabId: string;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
+  onToggleTabPin: (tabId: string) => void;
+  onDuplicateTab: (tabId: string) => void;
   onCreateTab: () => void;
   onReorderTabs: (draggedTabId: string, targetTabId: string, placement: "before" | "after") => void;
   topRightControls?: ReactNode;
@@ -18,6 +20,8 @@ export function WorkspacePane(props: WorkspacePaneProps) {
     activeTabId,
     onSelectTab,
     onCloseTab,
+    onToggleTabPin,
+    onDuplicateTab,
     onCreateTab,
     onReorderTabs,
     topRightControls,
@@ -31,6 +35,8 @@ export function WorkspacePane(props: WorkspacePaneProps) {
         activeTabId={activeTabId}
         onSelectTab={onSelectTab}
         onCloseTab={onCloseTab}
+        onToggleTabPin={onToggleTabPin}
+        onDuplicateTab={onDuplicateTab}
         onCreateTab={onCreateTab}
         onReorderTabs={onReorderTabs}
         trailingControls={topRightControls}

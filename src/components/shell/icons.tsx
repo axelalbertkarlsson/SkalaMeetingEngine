@@ -250,4 +250,66 @@ export function WindowCloseIcon() {
   );
 }
 
+export function OpenInNewTabIcon() {
+  return (
+    <BaseIcon>
+      <path d="M14 5h5v5" />
+      <path d="m10 14 9-9" />
+      <path d="M19 14v5H5V5h5" />
+    </BaseIcon>
+  );
+}
+
+export function DuplicateIcon() {
+  return (
+    <BaseIcon>
+      <rect x="9" y="9" width="10" height="10" rx="2" />
+      <path d="M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+    </BaseIcon>
+  );
+}
+
+export function PinIcon() {
+  return (
+    <BaseIcon>
+      <path d="M9 4.5h6" />
+      <path d="M8 7.5h8" />
+      <path d="M9.5 7.5v4.5l-2 1.5v1h9v-1l-2-1.5V7.5" />
+      <path d="M12 14.5v5" />
+    </BaseIcon>
+  );
+}
+
+export function ClipboardIcon() {
+  return (
+    <BaseIcon>
+      <rect x="6" y="5" width="12" height="16" rx="2" />
+      <path d="M9 5.5h6" />
+      <path d="M10 3h4a1 1 0 0 1 1 1v2H9V4a1 1 0 0 1 1-1Z" />
+    </BaseIcon>
+  );
+}
+
+export function RenameIcon() {
+  return (
+    <BaseIcon>
+      <path d="M4 20h4l10-10a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4 16v4Z" />
+      <path d="m12.5 7.5 4 4" />
+      <path d="M3 21h18" />
+    </BaseIcon>
+  );
+}
+
+export function TrashIcon() {
+  return (
+    <BaseIcon>
+      <path d="M4 7h16" />
+      <path d="M9 3h6" />
+      <path d="M6 7v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </BaseIcon>
+  );
+}
+
 
