@@ -2200,7 +2200,7 @@ function App() {
     document.body.style.cursor = "col-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.round(clamp(startWidth + (moveEvent.clientX - startX), 220, 360));
+      const nextWidth = Math.round(clamp(startWidth + (moveEvent.clientX - startX), 180, 360));
       setSidebarWidth(nextWidth);
     };
 
@@ -2225,7 +2225,7 @@ function App() {
     document.body.style.cursor = "col-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 260, 340));
+      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 220, 340));
       setInspectorWidth(nextWidth);
     };
 

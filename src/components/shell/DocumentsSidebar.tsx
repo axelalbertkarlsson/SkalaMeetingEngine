@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   ClipboardIcon,
   ChevronDownIcon,
@@ -420,7 +420,17 @@ export function DocumentsSidebar({
 
   const renderTree = (items: DocumentTreeItem[], depth = 0, parentFolderId: string | null = null) => {
     return (
-      <ul className="documents-tree-list" role={depth === 0 ? "tree" : "group"}>
+      <ul
+        className="documents-tree-list"
+        role={depth === 0 ? "tree" : "group"}
+        style={
+          depth > 0
+            ? ({
+                "--documents-tree-guide-depth": depth - 1
+              } as CSSProperties)
+            : undefined
+        }
+      >
         {items.map((item) => {
           const isFolderItem = isFolder(item);
           const hasChildren = isFolderItem && Boolean(item.children?.length);
