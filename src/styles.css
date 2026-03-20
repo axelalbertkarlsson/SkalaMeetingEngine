@@ -744,11 +744,27 @@ table {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .workspace-tab-close:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
+}
+
+.workspace-tab-close svg {
+  width: 13px;
+  height: 13px;
+}
+
+.workspace-tab-close.pinned {
+  color: var(--text-primary);
+}
+
+.workspace-tab-close.pinned:hover {
+  color: var(--accent-color);
 }
 
 .workspace-tab-new {
@@ -769,6 +785,32 @@ table {
   color: var(--text-primary);
 }
 
+.workspace-tab-context-menu {
+  z-index: 120;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: 7px;
+}
+
+.workspace-tab-context-menu .documents-tree-context-menu-item {
+  min-height: 32px;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.workspace-tab-context-menu .documents-tree-context-menu-icon {
+  width: 16px;
+  height: 16px;
+  flex-basis: 16px;
+}
+
+.workspace-tab-context-menu .documents-tree-context-menu-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
 .workspace-pane-content {
   flex: 1;
   min-height: 0;
@@ -776,8 +818,18 @@ table {
   padding: var(--space-3);
 }
 
+/* Dark: align with `workspace-tabs` (`--shell-sidebar-bg`); main shell uses `--shell-workspace-bg`. */
+:root:not([data-theme="light"]) .workspace-pane-content {
+  background: var(--shell-sidebar-bg);
+}
+
+/* Tighter top inset for documents: pane padding + documents-screen margin was 18px before toolbar. */
+.workspace-pane-content:has(.documents-screen) {
+  padding-top: var(--space-2);
+}
+
 .workspace-pane-content .documents-screen {
-  margin: 6px calc(var(--space-3) * -1) calc(var(--space-3) * -1);
+  margin: 0 calc(var(--space-3) * -1) calc(var(--space-3) * -1);
 }
 
 .workspace-screen {
@@ -1658,6 +1710,46 @@ table {
 
 .documents-context-menu-item.danger:hover {
   background: color-mix(in srgb, var(--danger-color) 14%, transparent);
+}
+
+.documents-tree-context-menu {
+  min-width: 172px;
+  padding: 6px;
+  border-radius: 9px;
+  box-shadow: 0 16px 34px rgba(20, 30, 50, 0.14);
+}
+
+.documents-tree-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.documents-tree-context-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-secondary);
+  flex: 0 0 18px;
+}
+
+.documents-tree-context-menu-item.danger .documents-tree-context-menu-icon {
+  color: currentColor;
+}
+
+.documents-tree-context-menu-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.documents-tree-context-menu-label {
+  white-space: nowrap;
 }
 
 

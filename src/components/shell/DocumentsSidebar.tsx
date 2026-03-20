@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
+  ClipboardIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CollapseAllIcon,
+  DuplicateIcon,
   ExpandAllIcon,
   NewFolderIcon,
   NewNoteIcon,
+  OpenInNewTabIcon,
+  RenameIcon,
+  TrashIcon,
   SortIcon
 } from "./icons";
 
@@ -139,6 +144,27 @@ function getContextActions(item: DocumentTreeItem): Array<{ id: DocumentContextA
     { id: "rename", label: "Rename" },
     { id: "delete", label: "Delete", danger: true }
   ];
+}
+
+function getContextActionIcon(actionId: DocumentContextAction) {
+  switch (actionId) {
+    case "open-in-new-tab":
+      return <OpenInNewTabIcon />;
+    case "new-note":
+      return <NewNoteIcon />;
+    case "new-subfolder":
+      return <NewFolderIcon />;
+    case "create-copy":
+      return <DuplicateIcon />;
+    case "copy-path":
+      return <ClipboardIcon />;
+    case "rename":
+      return <RenameIcon />;
+    case "delete":
+      return <TrashIcon />;
+    default:
+      return null;
+  }
 }
 
 export function DocumentsSidebar({
@@ -683,9 +709,9 @@ export function DocumentsSidebar({
           {contextMenu && contextItem ? (
             <div
               ref={contextMenuRef}
-              className="documents-context-menu"
+              className="documents-context-menu documents-tree-context-menu"
               style={{
-                left: `${Math.min(contextMenu.x, window.innerWidth - 220)}px`,
+                left: `${Math.min(contextMenu.x, window.innerWidth - 192)}px`,
                 top: `${Math.min(contextMenu.y, window.innerHeight - 240)}px`
               }}
               role="menu"
@@ -695,11 +721,14 @@ export function DocumentsSidebar({
                 <button
                   key={action.id}
                   type="button"
-                  className={action.danger ? "documents-context-menu-item danger" : "documents-context-menu-item"}
+                  className={action.danger ? "documents-context-menu-item documents-tree-context-menu-item danger" : "documents-context-menu-item documents-tree-context-menu-item"}
                   role="menuitem"
                   onClick={() => runContextAction(action.id)}
                 >
-                  {action.label}
+                  <span className="documents-tree-context-menu-icon" aria-hidden="true">
+                    {getContextActionIcon(action.id)}
+                  </span>
+                  <span className="documents-tree-context-menu-label">{action.label}</span>
                 </button>
               ))}
             </div>

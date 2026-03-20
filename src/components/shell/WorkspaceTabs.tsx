@@ -1,20 +1,25 @@
 import type { MouseEvent, ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { DuplicateIcon, PinIcon, WindowCloseIcon } from "./icons";
 
 export interface WorkspaceTab {
   id: string;
   title: string;
   closable: boolean;
+  pinned: boolean;
 }
 
 type DropPlacement = "before" | "after";
+type TabContextAction = "close" | "toggle-pin" | "duplicate";
 
 interface WorkspaceTabsProps {
   tabs: WorkspaceTab[];
   activeTabId: string;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
+  onToggleTabPin: (tabId: string) => void;
+  onDuplicateTab: (tabId: string) => void;
   onCreateTab: () => void;
   onReorderTabs: (draggedTabId: string, targetTabId: string, placement: DropPlacement) => void;
   trailingControls?: ReactNode;
@@ -27,17 +32,27 @@ interface PointerDragState {
   active: boolean;
 }
 
+interface ContextMenuState {
+  tabId: string;
+  x: number;
+  y: number;
+}
+
 export function WorkspaceTabs({
   tabs,
   activeTabId,
   onSelectTab,
   onCloseTab,
+  onToggleTabPin,
+  onDuplicateTab,
   onCreateTab,
   onReorderTabs,
   trailingControls
 }: WorkspaceTabsProps) {
   const [pointerDrag, setPointerDrag] = useState<PointerDragState | null>(null);
   const [dropTarget, setDropTarget] = useState<{ tabId: string; placement: DropPlacement } | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const startWindowDrag = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) {
@@ -152,6 +167,71 @@ export function WorkspaceTabs({
     };
   }, [pointerDrag, dropTarget, onReorderTabs]);
 
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && contextMenuRef.current?.contains(target)) {
+        return;
+      }
+
+      setContextMenu(null);
+    };
+
+    const closeMenu = () => setContextMenu(null);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    if (!tabs.some((tab) => tab.id === contextMenu.tabId)) {
+      setContextMenu(null);
+    }
+  }, [contextMenu, tabs]);
+
+  const runContextAction = (actionId: TabContextAction) => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const targetTabId = contextMenu.tabId;
+
+    if (actionId === "close") {
+      onCloseTab(targetTabId);
+    } else if (actionId === "toggle-pin") {
+      onToggleTabPin(targetTabId);
+    } else if (actionId === "duplicate") {
+      onDuplicateTab(targetTabId);
+    }
+
+    setContextMenu(null);
+  };
+
+  const contextTab = contextMenu ? tabs.find((tab) => tab.id === contextMenu.tabId) : undefined;
+
   return (
     <div className="workspace-tabs" onMouseDown={startWindowDrag}>
       <div className="workspace-tabs-main">
@@ -180,6 +260,15 @@ export function WorkspaceTabs({
                 data-tab-id={tab.id}
                 data-no-window-drag="true"
                 onMouseDown={(event) => beginTabDrag(tab.id, event)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  onSelectTab(tab.id);
+                  setContextMenu({
+                    tabId: tab.id,
+                    x: event.clientX,
+                    y: event.clientY
+                  });
+                }}
               >
                 <span className="workspace-tab-hover-surface" aria-hidden="true" />
                 <div className="workspace-tab-inner">
@@ -195,14 +284,21 @@ export function WorkspaceTabs({
                   {tab.closable && (
                     <button
                       type="button"
-                      className="workspace-tab-close"
-                      title={`Close ${tab.title}`}
-                      aria-label={`Close ${tab.title}`}
+                      className={tab.pinned ? "workspace-tab-close pinned" : "workspace-tab-close"}
+                      title={tab.pinned ? `Un-pin ${tab.title}` : `Close ${tab.title}`}
+                      aria-label={tab.pinned ? `Un-pin ${tab.title}` : `Close ${tab.title}`}
                       data-no-tab-drag="true"
                       onMouseDown={(event) => event.stopPropagation()}
-                      onClick={() => onCloseTab(tab.id)}
+                      onClick={() => {
+                        if (tab.pinned) {
+                          onToggleTabPin(tab.id);
+                          return;
+                        }
+
+                        onCloseTab(tab.id);
+                      }}
                     >
-                      x
+                      {tab.pinned ? <PinIcon /> : <WindowCloseIcon />}
                     </button>
                   )}
                 </div>
@@ -223,6 +319,55 @@ export function WorkspaceTabs({
       </div>
 
       {trailingControls ? <div className="workspace-tabs-trailing">{trailingControls}</div> : null}
+
+      {contextMenu && contextTab ? (
+        <div
+          ref={contextMenuRef}
+          className="documents-context-menu documents-tree-context-menu workspace-tab-context-menu"
+          style={{
+            left: `${Math.min(contextMenu.x, window.innerWidth - 196)}px`,
+            top: `${Math.min(contextMenu.y, window.innerHeight - 156)}px`
+          }}
+          role="menu"
+          aria-label={`Actions for ${contextTab.title}`}
+        >
+          <button
+            type="button"
+            className="documents-context-menu-item documents-tree-context-menu-item"
+            role="menuitem"
+            onClick={() => runContextAction("close")}
+          >
+            <span className="documents-tree-context-menu-icon" aria-hidden="true">
+              <WindowCloseIcon />
+            </span>
+            <span className="documents-tree-context-menu-label">Close tab</span>
+          </button>
+          <button
+            type="button"
+            className="documents-context-menu-item documents-tree-context-menu-item"
+            role="menuitem"
+            onClick={() => runContextAction("toggle-pin")}
+          >
+            <span className="documents-tree-context-menu-icon" aria-hidden="true">
+              <PinIcon />
+            </span>
+            <span className="documents-tree-context-menu-label">
+              {contextTab.pinned ? "Un-pin tab" : "Pin tab"}
+            </span>
+          </button>
+          <button
+            type="button"
+            className="documents-context-menu-item documents-tree-context-menu-item"
+            role="menuitem"
+            onClick={() => runContextAction("duplicate")}
+          >
+            <span className="documents-tree-context-menu-icon" aria-hidden="true">
+              <DuplicateIcon />
+            </span>
+            <span className="documents-tree-context-menu-label">Duplicate tab</span>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
