@@ -78,7 +78,10 @@ fn load_dictionary(app: &AppHandle) -> Result<PersonalDictionary, String> {
     Ok(sanitize_dictionary(dictionary))
 }
 
-fn save_dictionary(app: &AppHandle, dictionary: &PersonalDictionary) -> Result<PersonalDictionary, String> {
+fn save_dictionary(
+    app: &AppHandle,
+    dictionary: &PersonalDictionary,
+) -> Result<PersonalDictionary, String> {
     let path = dictionary_path(app)?;
     let sanitized = sanitize_dictionary(dictionary.clone());
     let serialized = serde_json::to_string_pretty(&sanitized).map_err(|error| {
