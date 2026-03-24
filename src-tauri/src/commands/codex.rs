@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,8 +20,11 @@ use crate::commands::types::OperationAck;
 
 const TERMINAL_CHUNK_EVENT: &str = "codex://terminal-chunk";
 const TERMINAL_EXIT_EVENT: &str = "codex://terminal-exit";
+const TERMINAL_LIFECYCLE_EVENT: &str = "codex://terminal-lifecycle";
 const MAX_PTY_BATCH_BYTES: usize = 8 * 1024;
 const MAX_PTY_BATCH_DELAY: Duration = Duration::from_millis(10);
+const FULL_SCREEN_CONTROL_ONLY_PTY_BATCH_DELAY: Duration = Duration::from_millis(40);
+const MAX_CONTROL_ONLY_PTY_BATCH_BYTES: usize = 256;
 
 #[derive(Default)]
 pub struct CodexSessionState {
@@ -63,6 +66,9 @@ struct CodexSession {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     sequence: SessionSequence,
+    lifecycle: SessionLifecycleState,
+    terminal_mode: TerminalMode,
+    terminal_host: TerminalHostInfoResponse,
     capture_bundle: Option<DebugCaptureBundle>,
 }
 
@@ -71,6 +77,8 @@ impl CodexSession {
         child: Box<dyn portable_pty::Child + Send>,
         writer: Option<Box<dyn Write + Send>>,
         master: Box<dyn portable_pty::MasterPty + Send>,
+        terminal_mode: TerminalMode,
+        terminal_host: TerminalHostInfoResponse,
         capture_bundle: Option<DebugCaptureBundle>,
     ) -> Self {
         Self {
@@ -78,6 +86,9 @@ impl CodexSession {
             writer: Mutex::new(writer),
             master: Mutex::new(master),
             sequence: SessionSequence::default(),
+            lifecycle: SessionLifecycleState::default(),
+            terminal_mode,
+            terminal_host,
             capture_bundle,
         }
     }
@@ -91,6 +102,65 @@ impl CodexSession {
             .as_ref()
             .map(DebugCaptureBundle::path_string)
     }
+
+    fn accepts_input(&self) -> bool {
+        self.lifecycle.accepts_input.load(Ordering::Relaxed)
+    }
+
+    fn begin_stop(&self) -> bool {
+        self.lifecycle
+            .stop_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn mark_first_pty_output(&self) -> bool {
+        self.lifecycle
+            .first_pty_output_seen
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn mark_exit_emitted(&self) -> bool {
+        self.lifecycle.accepts_input.store(false, Ordering::Relaxed);
+        self.lifecycle
+            .exit_emitted
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn disable_input(&self) {
+        self.lifecycle.accepts_input.store(false, Ordering::Relaxed);
+    }
+
+    fn terminal_host(&self) -> TerminalHostInfoResponse {
+        self.terminal_host.clone()
+    }
+}
+
+struct SessionLifecycleState {
+    accepts_input: AtomicBool,
+    first_pty_output_seen: AtomicBool,
+    stop_requested: AtomicBool,
+    exit_emitted: AtomicBool,
+}
+
+impl SessionLifecycleState {
+    fn default() -> Self {
+        Self {
+            accepts_input: AtomicBool::new(true),
+            first_pty_output_seen: AtomicBool::new(false),
+            stop_requested: AtomicBool::new(false),
+            exit_emitted: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalMode {
+    FullScreen,
+    Compact,
 }
 
 #[derive(Clone)]
@@ -106,6 +176,8 @@ impl DebugCaptureBundle {
         session_id: &str,
         command_line: &str,
         request_args: &[String],
+        terminal_mode: TerminalMode,
+        terminal_host: &TerminalHostInfoResponse,
     ) -> Result<Self, String> {
         let capture_root = Path::new(workspace_path)
             .join(".skala")
@@ -123,12 +195,8 @@ impl DebugCaptureBundle {
             "command_line": command_line,
             "args": request_args,
             "created_at_ms": now_unix_ms(),
-            "terminal_host": {
-                "windows_pty": {
-                    "backend": "conpty",
-                    "build_number": detect_windows_build_number()
-                }
-            },
+            "terminal_mode": terminal_mode,
+            "terminal_host": terminal_host,
             "files": {
                 "backend_events": "backend-events.ndjson",
                 "frontend_events": "frontend-events.ndjson"
@@ -213,15 +281,17 @@ pub struct SpawnCodexProcessResponse {
     pub session_id: String,
     pub status: String,
     pub message: String,
+    pub terminal_mode: TerminalMode,
+    pub terminal_host: TerminalHostInfoResponse,
     pub capture_bundle_path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct TerminalHostInfoResponse {
     pub windows_pty: Option<WindowsPtyInfoResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct WindowsPtyInfoResponse {
     pub backend: String,
     pub build_number: Option<u32>,
@@ -283,6 +353,8 @@ pub struct CodexCaptureManifest {
     #[serde(default)]
     pub args: Vec<String>,
     pub created_at_ms: u128,
+    #[serde(default = "default_terminal_mode")]
+    pub terminal_mode: TerminalMode,
     pub terminal_host: Value,
 }
 
@@ -326,6 +398,28 @@ enum TerminalChunkPayload {
 struct TerminalExitPayload {
     session_id: String,
     code: Option<i32>,
+    capture_bundle_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
+enum TerminalLifecyclePhase {
+    SessionStarted,
+    FirstPtyOutput,
+    StopRequested,
+    ResizeApplied,
+    ExitObserved,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct TerminalLifecyclePayload {
+    session_id: String,
+    phase: TerminalLifecyclePhase,
+    timestamp_ms: u128,
+    terminal_mode: TerminalMode,
+    terminal_host: TerminalHostInfoResponse,
+    cols: Option<u16>,
+    rows: Option<u16>,
     capture_bundle_path: Option<String>,
 }
 
@@ -488,6 +582,31 @@ fn build_spawn_attempts(command: &str, request_args: &[String]) -> Vec<SpawnAtte
     deduped
 }
 
+fn detect_terminal_mode(request_args: &[String]) -> TerminalMode {
+    if request_args.iter().any(|arg| arg == "--no-alt-screen") {
+        TerminalMode::Compact
+    } else {
+        TerminalMode::FullScreen
+    }
+}
+
+fn detect_terminal_host_info() -> TerminalHostInfoResponse {
+    #[cfg(target_os = "windows")]
+    {
+        return TerminalHostInfoResponse {
+            windows_pty: Some(WindowsPtyInfoResponse {
+                backend: "conpty".to_string(),
+                build_number: detect_windows_build_number(),
+            }),
+        };
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        TerminalHostInfoResponse { windows_pty: None }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn detect_windows_build_number() -> Option<u32> {
     let output = Command::new("cmd").args(["/C", "ver"]).output().ok()?;
@@ -512,6 +631,10 @@ fn now_unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+fn default_terminal_mode() -> TerminalMode {
+    TerminalMode::Compact
 }
 
 #[derive(Debug, Deserialize)]
@@ -629,7 +752,54 @@ fn build_system_chunk_payload(session_id: &str, seq: u64, text: String) -> Termi
     }
 }
 
+fn emit_terminal_lifecycle(
+    app: &AppHandle,
+    session_id: &str,
+    session: &CodexSession,
+    phase: TerminalLifecyclePhase,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) {
+    let payload = TerminalLifecyclePayload {
+        session_id: session_id.to_string(),
+        phase: phase.clone(),
+        timestamp_ms: now_unix_ms(),
+        terminal_mode: session.terminal_mode,
+        terminal_host: session.terminal_host(),
+        cols,
+        rows,
+        capture_bundle_path: session.capture_path(),
+    };
+
+    if let Some(capture_bundle) = &session.capture_bundle {
+        capture_bundle.write_backend_event(
+            "terminal_lifecycle",
+            json!({
+                "phase": phase,
+                "terminal_mode": session.terminal_mode,
+                "terminal_host": session.terminal_host(),
+                "cols": cols,
+                "rows": rows,
+                "capture_bundle_path": session.capture_path(),
+            }),
+        );
+    }
+
+    let _ = app.emit(TERMINAL_LIFECYCLE_EVENT, payload);
+}
+
 fn emit_pty_chunk(app: &AppHandle, session_id: &str, session: &CodexSession, bytes: Vec<u8>) {
+    if session.mark_first_pty_output() {
+        emit_terminal_lifecycle(
+            app,
+            session_id,
+            session,
+            TerminalLifecyclePhase::FirstPtyOutput,
+            None,
+            None,
+        );
+    }
+
     let seq = session.next_seq();
     let encoded = BASE64_STANDARD.encode(&bytes);
     debug_log(format!(
@@ -686,15 +856,29 @@ fn emit_system_chunk(app: &AppHandle, session_id: &str, session: &CodexSession, 
 fn emit_terminal_exit(
     app: &AppHandle,
     session_id: &str,
+    session: &CodexSession,
     code: Option<i32>,
     capture_bundle_path: Option<String>,
 ) {
+    if !session.mark_exit_emitted() {
+        return;
+    }
+
     debug_log(format!(
         "exit session={} code={:?} ts_ms={}",
         session_id,
         code,
         now_unix_ms()
     ));
+
+    emit_terminal_lifecycle(
+        app,
+        session_id,
+        session,
+        TerminalLifecyclePhase::ExitObserved,
+        None,
+        None,
+    );
 
     let payload = TerminalExitPayload {
         session_id: session_id.to_string(),
@@ -705,9 +889,83 @@ fn emit_terminal_exit(
     let _ = app.emit(TERMINAL_EXIT_EVENT, payload);
 }
 
-fn should_flush_pty_batch(pending_len: usize, next_len: usize, elapsed: Duration) -> bool {
-    pending_len > 0
-        && (pending_len + next_len > MAX_PTY_BATCH_BYTES || elapsed >= MAX_PTY_BATCH_DELAY)
+fn is_control_only_pty_chunk(bytes: &[u8]) -> bool {
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\x1b' => {
+                index += 1;
+                if index >= bytes.len() {
+                    break;
+                }
+
+                match bytes[index] {
+                    b'[' => {
+                        index += 1;
+                        while index < bytes.len() {
+                            let byte = bytes[index];
+                            index += 1;
+                            if (0x40..=0x7e).contains(&byte) {
+                                break;
+                            }
+                        }
+                    }
+                    b']' => {
+                        index += 1;
+                        while index < bytes.len() {
+                            let byte = bytes[index];
+                            index += 1;
+                            if byte == 0x07 {
+                                break;
+                            }
+
+                            if byte == b'\x1b' && bytes.get(index) == Some(&b'\\') {
+                                index += 1;
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        index += 1;
+                    }
+                }
+            }
+            b'\r' | b'\n' | b'\t' | 0x07 | 0x08 => {
+                index += 1;
+            }
+            0x20..=0x7e => return false,
+            byte if byte >= 0x80 => return false,
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    true
+}
+
+fn pty_batch_delay(terminal_mode: TerminalMode, pending: &[u8]) -> Duration {
+    if terminal_mode == TerminalMode::FullScreen
+        && !pending.is_empty()
+        && pending.len() <= MAX_CONTROL_ONLY_PTY_BATCH_BYTES
+        && is_control_only_pty_chunk(pending)
+    {
+        FULL_SCREEN_CONTROL_ONLY_PTY_BATCH_DELAY
+    } else {
+        MAX_PTY_BATCH_DELAY
+    }
+}
+
+fn should_flush_pty_batch(
+    terminal_mode: TerminalMode,
+    pending: &[u8],
+    next_len: usize,
+    elapsed: Duration,
+) -> bool {
+    pending.len() > 0
+        && (pending.len() + next_len > MAX_PTY_BATCH_BYTES
+            || elapsed >= pty_batch_delay(terminal_mode, pending))
 }
 
 fn spawn_stream_reader(
@@ -753,7 +1011,8 @@ fn spawn_stream_reader(
             let recv_result = match batch_started_at {
                 Some(started_at) => {
                     let elapsed = started_at.elapsed();
-                    if elapsed >= MAX_PTY_BATCH_DELAY {
+                    let batch_delay = pty_batch_delay(session.terminal_mode, &pending);
+                    if elapsed >= batch_delay {
                         if !pending.is_empty() {
                             emit_pty_chunk(
                                 &app,
@@ -766,7 +1025,7 @@ fn spawn_stream_reader(
                         continue;
                     }
 
-                    chunk_rx.recv_timeout(MAX_PTY_BATCH_DELAY - elapsed)
+                    chunk_rx.recv_timeout(batch_delay - elapsed)
                 }
                 None => match chunk_rx.recv() {
                     Ok(chunk) => Ok(chunk),
@@ -779,7 +1038,8 @@ fn spawn_stream_reader(
                     if pending.is_empty() {
                         batch_started_at = Some(Instant::now());
                     } else if should_flush_pty_batch(
-                        pending.len(),
+                        session.terminal_mode,
+                        &pending,
                         chunk.len(),
                         batch_started_at
                             .map(|started_at| started_at.elapsed())
@@ -844,7 +1104,13 @@ fn spawn_exit_watcher(
                         session.as_ref(),
                         "\n[system] Failed to access process state (lock poisoned).\n".to_string(),
                     );
-                    emit_terminal_exit(&app, &session_id, None, session.capture_path());
+                    emit_terminal_exit(
+                        &app,
+                        &session_id,
+                        session.as_ref(),
+                        None,
+                        session.capture_path(),
+                    );
                     if let Ok(mut sessions) = state.lock() {
                         sessions.remove(&session_id);
                     }
@@ -875,7 +1141,14 @@ fn spawn_exit_watcher(
             );
         }
 
-        emit_terminal_exit(&app, &session_id, exit_code, session.capture_path());
+        session.disable_input();
+        emit_terminal_exit(
+            &app,
+            &session_id,
+            session.as_ref(),
+            exit_code,
+            session.capture_path(),
+        );
         if let Ok(mut sessions) = state.lock() {
             sessions.remove(&session_id);
         }
@@ -884,20 +1157,7 @@ fn spawn_exit_watcher(
 
 #[tauri::command]
 pub fn get_terminal_host_info() -> TerminalHostInfoResponse {
-    #[cfg(target_os = "windows")]
-    {
-        return TerminalHostInfoResponse {
-            windows_pty: Some(WindowsPtyInfoResponse {
-                backend: "conpty".to_string(),
-                build_number: detect_windows_build_number(),
-            }),
-        };
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        TerminalHostInfoResponse { windows_pty: None }
-    }
+    detect_terminal_host_info()
 }
 
 #[tauri::command]
@@ -959,6 +1219,8 @@ pub fn spawn_codex_process(
     request: SpawnCodexProcessRequest,
 ) -> Result<SpawnCodexProcessResponse, String> {
     let request_args = request.args.clone().unwrap_or_default();
+    let terminal_mode = detect_terminal_mode(&request_args);
+    let terminal_host = detect_terminal_host_info();
     let attempts = build_spawn_attempts(&request.command, &request_args);
 
     let pty_system = native_pty_system();
@@ -1047,6 +1309,8 @@ pub fn spawn_codex_process(
             &session_id,
             &command_line,
             &spawned_args,
+            terminal_mode,
+            &terminal_host,
         )?)
     } else {
         None
@@ -1057,6 +1321,8 @@ pub fn spawn_codex_process(
         child,
         Some(writer),
         master,
+        terminal_mode,
+        terminal_host.clone(),
         capture_bundle,
     ));
     state.insert(session_id.clone(), Arc::clone(&session))?;
@@ -1070,6 +1336,15 @@ pub fn spawn_codex_process(
             }),
         );
     }
+
+    emit_terminal_lifecycle(
+        &app,
+        &session_id,
+        session.as_ref(),
+        TerminalLifecyclePhase::SessionStarted,
+        None,
+        None,
+    );
 
     spawn_stream_reader(
         app.clone(),
@@ -1085,22 +1360,14 @@ pub fn spawn_codex_process(
         Arc::clone(&session),
     );
 
-    let message = format!(
-        "Codex process started with '{}' in workspace '{}'.",
-        command_line, request.workspace_path
-    );
-
-    emit_system_chunk(
-        &app,
-        &session_id,
-        session.as_ref(),
-        format!("\n[system] {}\n", message),
-    );
+    let message = "Codex process started.".to_string();
 
     Ok(SpawnCodexProcessResponse {
         session_id,
         status: "running".to_string(),
         message,
+        terminal_mode,
+        terminal_host,
         capture_bundle_path,
     })
 }
@@ -1152,6 +1419,16 @@ pub fn send_codex_input(
         .get(&request.session_id)?
         .ok_or_else(|| format!("No active session '{}'", request.session_id))?;
 
+    if !session.accepts_input() {
+        return Ok(OperationAck {
+            ok: true,
+            message: format!(
+                "Session '{}' is stopping or already exited. Input ignored.",
+                request.session_id
+            ),
+        });
+    }
+
     let mut writer_guard = session
         .writer
         .lock()
@@ -1198,6 +1475,7 @@ pub fn send_codex_input(
 
 #[tauri::command]
 pub fn stop_codex_process(
+    app: AppHandle,
     state: State<CodexSessionState>,
     request: StopCodexProcessRequest,
 ) -> Result<OperationAck, String> {
@@ -1211,10 +1489,22 @@ pub fn stop_codex_process(
         });
     };
 
-    if let Some(capture_bundle) = &session.capture_bundle {
-        capture_bundle.write_backend_event("stop_requested", json!({}));
+    if session.begin_stop() {
+        if let Some(capture_bundle) = &session.capture_bundle {
+            capture_bundle.write_backend_event("stop_requested", json!({}));
+        }
+
+        emit_terminal_lifecycle(
+            &app,
+            &request.session_id,
+            session.as_ref(),
+            TerminalLifecyclePhase::StopRequested,
+            None,
+            None,
+        );
     }
 
+    session.disable_input();
     if let Ok(mut writer_guard) = session.writer.lock() {
         writer_guard.take();
     }
@@ -1241,6 +1531,7 @@ pub fn stop_codex_process(
 
 #[tauri::command]
 pub fn resize_codex_terminal(
+    app: AppHandle,
     state: State<CodexSessionState>,
     request: ResizeCodexTerminalRequest,
 ) -> Result<OperationAck, String> {
@@ -1294,6 +1585,15 @@ pub fn resize_codex_terminal(
         );
     }
 
+    emit_terminal_lifecycle(
+        &app,
+        &request.session_id,
+        session.as_ref(),
+        TerminalLifecyclePhase::ResizeApplied,
+        Some(cols),
+        Some(rows),
+    );
+
     Ok(OperationAck {
         ok: true,
         message: format!(
@@ -1309,13 +1609,27 @@ mod tests {
 
     #[test]
     fn pty_batch_flushes_on_size_or_time_boundaries() {
+        let pending = vec![b'a'; 1024];
         assert!(!should_flush_pty_batch(
-            1024,
+            TerminalMode::Compact,
+            &pending,
             1024,
             Duration::from_millis(5)
         ));
-        assert!(should_flush_pty_batch(8190, 4, Duration::from_millis(0)));
-        assert!(should_flush_pty_batch(128, 64, Duration::from_millis(10)));
+        let almost_full = vec![b'a'; 8190];
+        assert!(should_flush_pty_batch(
+            TerminalMode::Compact,
+            &almost_full,
+            4,
+            Duration::from_millis(0)
+        ));
+        let moderate = vec![b'a'; 128];
+        assert!(should_flush_pty_batch(
+            TerminalMode::Compact,
+            &moderate,
+            64,
+            Duration::from_millis(10)
+        ));
     }
 
     #[test]
@@ -1342,6 +1656,68 @@ mod tests {
             }
             TerminalChunkPayload::System { .. } => panic!("expected PTY payload"),
         }
+    }
+
+    #[test]
+    fn terminal_mode_detects_compact_flag() {
+        assert_eq!(detect_terminal_mode(&[]), TerminalMode::FullScreen);
+        assert_eq!(
+            detect_terminal_mode(&["--no-alt-screen".to_string()]),
+            TerminalMode::Compact
+        );
+    }
+
+    #[test]
+    fn control_only_pty_chunks_are_detected_for_cursor_move_packets() {
+        let cursor_only = b"\x1b[?25l\x1b[14;3H\x1b[?25h";
+        let repaint_with_text = b"\x1b[10;2HHello";
+
+        assert!(is_control_only_pty_chunk(cursor_only));
+        assert!(!is_control_only_pty_chunk(repaint_with_text));
+    }
+
+    #[test]
+    fn full_screen_control_only_chunks_use_extended_batch_delay() {
+        let cursor_only = b"\x1b[?25l\x1b[14;3H\x1b[?25h";
+        assert_eq!(
+            pty_batch_delay(TerminalMode::FullScreen, cursor_only),
+            FULL_SCREEN_CONTROL_ONLY_PTY_BATCH_DELAY
+        );
+        assert_eq!(
+            pty_batch_delay(TerminalMode::Compact, cursor_only),
+            MAX_PTY_BATCH_DELAY
+        );
+        assert_eq!(
+            pty_batch_delay(TerminalMode::FullScreen, b"\x1b[10;2HHello"),
+            MAX_PTY_BATCH_DELAY
+        );
+    }
+
+    #[test]
+    fn lifecycle_state_deduplicates_stop_and_exit_and_blocks_input() {
+        let lifecycle = SessionLifecycleState::default();
+        assert!(lifecycle.accepts_input.load(Ordering::Relaxed));
+
+        assert!(lifecycle
+            .stop_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+        assert!(lifecycle
+            .stop_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
+
+        lifecycle.accepts_input.store(false, Ordering::Relaxed);
+        assert!(!lifecycle.accepts_input.load(Ordering::Relaxed));
+
+        assert!(lifecycle
+            .exit_emitted
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+        assert!(lifecycle
+            .exit_emitted
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
     }
 
     #[cfg(target_os = "windows")]

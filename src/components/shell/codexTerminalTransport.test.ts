@@ -1,10 +1,16 @@
-﻿import {
+import {
+  consumeTerminalSyncOutput,
+  createTerminalSyncOutputState,
   createTerminalSequenceState,
   decodeBase64ToUint8Array,
   enqueueTerminalWrite,
   flushTerminalWriteSequence,
+  getTerminalIdleThresholdMs,
   getTerminalResizeDelayMs,
+  getTerminalWriteFlushDelayMs,
+  getTerminalVisualResetReason,
   shouldDeferTerminalResize,
+  shouldForceTerminalResize,
   type TerminalQueuedWrite
 } from "./codexTerminalTransport.js";
 
@@ -23,6 +29,12 @@ function asText(bytes: Uint8Array) {
   return Array.from(bytes)
     .map((value) => String.fromCharCode(value))
     .join("");
+}
+
+function asBytes(text: string) {
+  return new Uint8Array(
+    Array.from(text).map((character) => character.charCodeAt(0))
+  );
 }
 
 function asPtyWrite(seq: number, text: string): TerminalQueuedWrite {
@@ -78,6 +90,51 @@ export const tests: TerminalHelperTestCase[] = [
     }
   },
   {
+    name: "consumeTerminalSyncOutput buffers synchronized output until the end marker arrives",
+    run() {
+      const start = "\u001b[?2026h";
+      const end = "\u001b[?2026l";
+      let state = createTerminalSyncOutputState();
+
+      const first = consumeTerminalSyncOutput(state, asBytes(`A${start}B`));
+      state = first.state;
+      assert(first.ready.length === 1, `expected one immediate ready chunk, received ${first.ready.length}`);
+      assert(asText(first.ready[0] ?? new Uint8Array()) === "A", "expected normal bytes before sync mode to flush immediately");
+      assert(state.active, "expected synchronized output mode to remain active");
+
+      const second = consumeTerminalSyncOutput(state, asBytes(`C${end}D`));
+      state = second.state;
+      assert(!state.active, "expected synchronized output mode to close");
+      assert(second.ready.length === 2, `expected buffered sync bytes plus trailing bytes, received ${second.ready.length}`);
+      assert(asText(second.ready[0] ?? new Uint8Array()) === "BC", "expected buffered sync bytes to flush atomically");
+      assert(asText(second.ready[1] ?? new Uint8Array()) === "D", "expected post-sync bytes to remain visible");
+    }
+  },
+  {
+    name: "consumeTerminalSyncOutput handles split sync markers across PTY chunk boundaries",
+    run() {
+      let state = createTerminalSyncOutputState();
+
+      let update = consumeTerminalSyncOutput(state, asBytes("A\u001b[?20"));
+      state = update.state;
+      assert(update.ready.length === 1, `expected visible prefix to flush immediately, received ${update.ready.length}`);
+      assert(asText(update.ready[0] ?? new Uint8Array()) === "A", "expected non-marker bytes to pass through");
+      assert(state.carry.length > 0, "expected a partial sync marker to be retained as carry");
+
+      update = consumeTerminalSyncOutput(state, asBytes("26hBC"));
+      state = update.state;
+      assert(update.ready.length === 0, "expected bytes inside sync mode to remain buffered");
+      assert(state.active, "expected sync mode to become active after the split marker completes");
+
+      update = consumeTerminalSyncOutput(state, asBytes("\u001b[?2026lD"));
+      state = update.state;
+      assert(!state.active, "expected sync mode to close after the end marker");
+      assert(update.ready.length === 2, `expected buffered sync bytes and trailing bytes, received ${update.ready.length}`);
+      assert(asText(update.ready[0] ?? new Uint8Array()) === "BC", "expected buffered sync body to flush once");
+      assert(asText(update.ready[1] ?? new Uint8Array()) === "D", "expected trailing bytes after sync mode to remain visible");
+    }
+  },
+  {
     name: "shouldDeferTerminalResize only blocks focused active input windows",
     run() {
       assert(
@@ -95,6 +152,93 @@ export const tests: TerminalHelperTestCase[] = [
       assert(
         getTerminalResizeDelayMs({ lastInputAtMs: 1000, nowMs: 1100 }) === 150,
         "expected remaining resize delay of 150ms"
+      );
+    }
+  },
+  {
+    name: "full-screen resize behavior uses shorter idle windows and bounded deferral",
+    run() {
+      assert(
+        getTerminalIdleThresholdMs("full_screen") === 120,
+        "expected full-screen idle threshold to be shortened"
+      );
+      assert(
+        getTerminalIdleThresholdMs("compact") === 250,
+        "expected compact mode to retain the default idle threshold"
+      );
+      assert(
+        shouldForceTerminalResize({ pendingSinceMs: 1000, nowMs: 1450 }),
+        "expected long deferrals to be forced through"
+      );
+      assert(
+        !shouldForceTerminalResize({ pendingSinceMs: 1000, nowMs: 1200 }),
+        "expected recent resize requests to remain deferrable"
+      );
+    }
+  },
+  {
+    name: "getTerminalVisualResetReason only resets for clear or new session attach",
+    run() {
+      assert(
+        getTerminalVisualResetReason({
+          previousSessionId: "codex-1",
+          nextSessionId: "codex-1",
+          clearSignalChanged: false
+        }) === null,
+        "expected no reset for routine session updates"
+      );
+      assert(
+        getTerminalVisualResetReason({
+          previousSessionId: "codex-1",
+          nextSessionId: "codex-2",
+          clearSignalChanged: false
+        }) === "session_attached",
+        "expected a reset when a new session attaches"
+      );
+      assert(
+        getTerminalVisualResetReason({
+          previousSessionId: "codex-2",
+          nextSessionId: "codex-2",
+          clearSignalChanged: true
+        }) === "clear_requested",
+        "expected an explicit clear to reset the terminal"
+      );
+    }
+  },
+  {
+    name: "getTerminalWriteFlushDelayMs frame-batches full-screen PTY traffic only",
+    run() {
+      assert(
+        getTerminalWriteFlushDelayMs({
+          terminalMode: "full_screen",
+          hasPtyWrite: true,
+          ptyByteLength: 10
+        }) === 16,
+        "expected full-screen PTY writes to be deferred to the next frame"
+      );
+      assert(
+        getTerminalWriteFlushDelayMs({
+          terminalMode: "full_screen",
+          hasPtyWrite: true,
+          ptyByteLength: 120
+        }) === 48,
+        "expected larger full-screen PTY repaints to use an extended flush window"
+      );
+      assert(
+        getTerminalWriteFlushDelayMs({
+          terminalMode: "full_screen",
+          hasPtyWrite: false,
+          ptyByteLength: 120
+        }) === 0,
+        "expected non-PTY writes to stay immediate"
+      );
+      assert(
+        getTerminalWriteFlushDelayMs({
+          terminalMode: "compact",
+          hasPtyWrite: true,
+          ptyByteLength: 120
+        }) === 0,
+        "expected compact PTY writes to remain immediate"
       );
     }
   }

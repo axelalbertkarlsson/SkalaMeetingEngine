@@ -175,7 +175,8 @@ pub fn stop_recording(session: &mut RecordingSession) -> Result<()> {
 }
 
 fn initialize_log(log_path: &Path) -> Result<()> {
-    File::create(log_path).with_context(|| format!("Failed to create '{}'.", log_path.display()))?;
+    File::create(log_path)
+        .with_context(|| format!("Failed to create '{}'.", log_path.display()))?;
     Ok(())
 }
 
@@ -191,11 +192,7 @@ fn build_ffmpeg_microphone_command(ffmpeg_path: &str, output_path: &Path) -> Res
     Ok(command)
 }
 
-fn spawn_ffmpeg_process(
-    mut command: Command,
-    log_path: &Path,
-    ffmpeg_path: &str,
-) -> Result<Child> {
+fn spawn_ffmpeg_process(mut command: Command, log_path: &Path, ffmpeg_path: &str) -> Result<Child> {
     let log_file = open_log_append(log_path)?;
     let log_file_err = log_file.try_clone()?;
 
@@ -375,7 +372,10 @@ fn mix_recordings(
     output_path: &Path,
     log_path: &Path,
 ) -> Result<()> {
-    append_log_line(log_path, "Mixing microphone and system audio into final recording.")?;
+    append_log_line(
+        log_path,
+        "Mixing microphone and system audio into final recording.",
+    )?;
 
     let mut command = Command::new(ffmpeg_path);
     command
@@ -471,18 +471,21 @@ fn native_system_audio_recording_loop(
     stop_flag: Arc<AtomicBool>,
     ready_tx: &mpsc::SyncSender<std::result::Result<(), String>>,
 ) -> Result<()> {
-    append_log_line(log_path, "Starting Windows system audio capture via WASAPI loopback.")?;
+    append_log_line(
+        log_path,
+        "Starting Windows system audio capture via WASAPI loopback.",
+    )?;
 
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow!("No default Windows output device was found for system audio capture."))?;
+    let device = host.default_output_device().ok_or_else(|| {
+        anyhow!("No default Windows output device was found for system audio capture.")
+    })?;
     let device_name = device
         .name()
         .unwrap_or_else(|_| "Unknown Windows output device".to_string());
-    let supported_config = device
-        .default_output_config()
-        .with_context(|| format!("Failed to read the default output config for '{device_name}'."))?;
+    let supported_config = device.default_output_config().with_context(|| {
+        format!("Failed to read the default output config for '{device_name}'.")
+    })?;
     let sample_format = supported_config.sample_format();
     let config: StreamConfig = supported_config.clone().into();
 
@@ -676,10 +679,7 @@ fn finalize_wav_writer(writer: &Arc<Mutex<Option<WavWriterHandle>>>) -> Result<(
 }
 
 #[cfg(target_os = "windows")]
-fn write_wav_samples<T>(
-    writer: &Arc<Mutex<Option<WavWriterHandle>>>,
-    data: &[T],
-) -> Result<()>
+fn write_wav_samples<T>(writer: &Arc<Mutex<Option<WavWriterHandle>>>, data: &[T]) -> Result<()>
 where
     T: Copy,
     WavWriterHandle: WavWritable<T>,
@@ -706,7 +706,11 @@ enum WavWriterHandle {
 
 #[cfg(target_os = "windows")]
 impl WavWriterHandle {
-    fn create(output_path: &Path, config: &StreamConfig, sample_format: SampleFormat) -> Result<Self> {
+    fn create(
+        output_path: &Path,
+        config: &StreamConfig,
+        sample_format: SampleFormat,
+    ) -> Result<Self> {
         let wav_spec = WavSpec {
             channels: config.channels,
             sample_rate: config.sample_rate.0,
@@ -715,8 +719,8 @@ impl WavWriterHandle {
                 SampleFormat::I16 | SampleFormat::U16 => 16,
                 _ => {
                     return Err(anyhow!(
-                        "Unsupported Windows output sample format '{sample_format:?}' for WAV writing."
-                    ))
+                    "Unsupported Windows output sample format '{sample_format:?}' for WAV writing."
+                ))
                 }
             },
             sample_format: match sample_format {
@@ -738,8 +742,12 @@ impl WavWriterHandle {
 
     fn finalize(self) -> Result<()> {
         match self {
-            Self::F32(writer) => writer.finalize().context("Failed to finalize f32 WAV output."),
-            Self::I16(writer) => writer.finalize().context("Failed to finalize i16 WAV output."),
+            Self::F32(writer) => writer
+                .finalize()
+                .context("Failed to finalize f32 WAV output."),
+            Self::I16(writer) => writer
+                .finalize()
+                .context("Failed to finalize i16 WAV output."),
         }
     }
 }
@@ -754,7 +762,9 @@ impl WavWritable<f32> for WavWriterHandle {
                 }
                 Ok(())
             }
-            _ => Err(anyhow!("Attempted to write f32 samples into a non-f32 WAV writer.")),
+            _ => Err(anyhow!(
+                "Attempted to write f32 samples into a non-f32 WAV writer."
+            )),
         }
     }
 }
@@ -769,7 +779,9 @@ impl WavWritable<i16> for WavWriterHandle {
                 }
                 Ok(())
             }
-            _ => Err(anyhow!("Attempted to write i16 samples into a non-i16 WAV writer.")),
+            _ => Err(anyhow!(
+                "Attempted to write i16 samples into a non-i16 WAV writer."
+            )),
         }
     }
 }
@@ -784,7 +796,9 @@ impl WavWritable<u16> for WavWriterHandle {
                 }
                 Ok(())
             }
-            _ => Err(anyhow!("Attempted to write u16 samples into a non-i16 WAV writer.")),
+            _ => Err(anyhow!(
+                "Attempted to write u16 samples into a non-i16 WAV writer."
+            )),
         }
     }
 }

@@ -23,6 +23,7 @@ interface CaptureBundleManifest {
   command_line: string;
   created_at_ms: number;
   args: string[];
+  terminal_mode?: "full_screen" | "compact";
   terminal_host: {
     windows_pty?: {
       backend: "conpty" | "winpty";
@@ -451,6 +452,10 @@ export function CodexScreen({ workspace }: CodexScreenProps) {
             <div>
               <dt>Chunks</dt>
               <dd>{loadedBundle.chunks.length}</dd>
+            </div>
+            <div>
+              <dt>Terminal mode</dt>
+              <dd>{loadedBundle.manifest.terminal_mode === "compact" ? "Compact fallback" : "Full-screen primary"}</dd>
             </div>
             <div>
               <dt>PTY mode</dt>

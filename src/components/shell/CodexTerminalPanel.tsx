@@ -4,13 +4,20 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import {
+  consumeTerminalSyncOutput,
+  createTerminalSyncOutputState,
   createTerminalSequenceState,
   decodeBase64ToUint8Array,
   encodeTextToBase64,
   enqueueTerminalWrite,
   flushTerminalWriteSequence,
+  getTerminalIdleThresholdMs,
   getTerminalResizeDelayMs,
+  getTerminalWriteFlushDelayMs,
+  getTerminalVisualResetReason,
   shouldDeferTerminalResize,
+  shouldForceTerminalResize,
+  type TerminalMode,
   type TerminalChunkEventPayload,
   type TerminalQueuedWrite
 } from "./codexTerminalTransport";
@@ -19,34 +26,22 @@ const TERMINAL_CHUNK_EVENT = "codex://terminal-chunk";
 const FIT_DEBOUNCE_MS = 120;
 const CAPTURE_FLUSH_DELAY_MS = 100;
 const CAPTURE_FLUSH_BATCH_SIZE = 50;
+const FULL_SCREEN_PTY_WRITE_MAX_HOLD_MS = 96;
+const FULL_SCREEN_BACKSPACE_WRITE_DEBOUNCE_IDLE_MS = 150;
+const FULL_SCREEN_BACKSPACE_WRITE_MAX_HOLD_MS = 160;
 
-interface WindowsPtyInfo {
+export interface WindowsPtyInfo {
   backend: "conpty" | "winpty";
   buildNumber?: number;
 }
 
-interface TerminalHostInfoResponse {
-  windows_pty: {
-    backend: "conpty" | "winpty";
-    build_number?: number | null;
-  } | null;
+export interface TerminalHostInfo {
+  windowsPty: WindowsPtyInfo | null;
 }
 
 interface FrontendCaptureEvent {
   event_type: string;
   data: Record<string, unknown>;
-}
-
-function mapWindowsPtyInfo(hostInfo: TerminalHostInfoResponse): WindowsPtyInfo | null {
-  const windowsPty = hostInfo.windows_pty;
-  if (!windowsPty) {
-    return null;
-  }
-
-  return {
-    backend: windowsPty.backend,
-    buildNumber: windowsPty.build_number ?? undefined
-  };
 }
 
 type LocalTerminalWrite = {
@@ -55,6 +50,27 @@ type LocalTerminalWrite = {
 };
 
 type BufferedTerminalWrite = TerminalQueuedWrite | LocalTerminalWrite;
+
+type CoalescedBufferedTerminalWrite =
+  | {
+      kind: "pty";
+      chunks: Uint8Array[];
+      byteLength: number;
+      sourceCount: number;
+    }
+  | {
+      kind: "system";
+      text: string;
+      sourceCount: number;
+    };
+
+type TerminalDensity = "comfortable" | "dense";
+
+interface TerminalTypography {
+  density: TerminalDensity;
+  fontSize: number;
+  lineHeight: number;
+}
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -84,10 +100,15 @@ export interface CodexSessionState {
   status: CodexSessionStatus;
   message: string;
   lastExitCode: number | null;
+  terminalMode: TerminalMode | null;
+  captureBundlePath: string | null;
+  lastLifecyclePhase: string | null;
+  lastResize: { cols: number; rows: number } | null;
 }
 
 interface CodexTerminalPanelProps {
   session: CodexSessionState;
+  terminalHostInfo: TerminalHostInfo | null;
   entries: CodexTerminalEntry[];
   clearSignal: number;
   captureEnabled: boolean;
@@ -111,9 +132,143 @@ function formatSystemText(text: string) {
   return `\x1b[90m${text}\x1b[0m`;
 }
 
+function classifyInput(input: string) {
+  if (input === " ") {
+    return "space";
+  }
+
+  if (input === "\u007f" || input === "\b") {
+    return "backspace";
+  }
+
+  if (input === "\r") {
+    return "enter";
+  }
+
+  return "other";
+}
+
+function readTerminalSnapshot(terminal: Terminal | null, host: HTMLDivElement | null) {
+  if (!terminal) {
+    return {
+      cols: null,
+      rows: null,
+      cursor_x: null,
+      cursor_y: null,
+      viewport_y: null,
+      base_y: null,
+      host_width: host?.clientWidth ?? null,
+      host_height: host?.clientHeight ?? null,
+      device_pixel_ratio: typeof window === "undefined" ? null : window.devicePixelRatio
+    };
+  }
+
+  return {
+    cols: terminal.cols,
+    rows: terminal.rows,
+    cursor_x: terminal.buffer.active.cursorX,
+    cursor_y: terminal.buffer.active.cursorY,
+    viewport_y: terminal.buffer.active.viewportY,
+    base_y: terminal.buffer.active.baseY,
+    host_width: host?.clientWidth ?? null,
+    host_height: host?.clientHeight ?? null,
+    device_pixel_ratio: typeof window === "undefined" ? null : window.devicePixelRatio
+  };
+}
+
+function readTerminalLineContext(terminal: Terminal | null, radius = 1) {
+  if (!terminal) {
+    return [];
+  }
+
+  const activeBuffer = terminal.buffer.active;
+  const startRow = Math.max(0, activeBuffer.cursorY - radius);
+  const endRow = Math.min(terminal.rows - 1, activeBuffer.cursorY + radius);
+  const lines: Array<{ row: number; text: string }> = [];
+
+  for (let row = startRow; row <= endRow; row += 1) {
+    const absoluteRow = activeBuffer.viewportY + row;
+    const line = activeBuffer.getLine(absoluteRow);
+    lines.push({
+      row: absoluteRow,
+      text: line?.translateToString(false, 0, terminal.cols) ?? ""
+    });
+  }
+
+  return lines;
+}
+
+function concatUint8Arrays(chunks: Uint8Array[], totalLength: number) {
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return combined;
+}
+
+function getTerminalTypography(terminalMode: TerminalMode | null): TerminalTypography {
+  if (terminalMode === "full_screen") {
+    return {
+      density: "dense",
+      fontSize: 11,
+      lineHeight: 1.1
+    };
+  }
+
+  return {
+    density: "comfortable",
+    fontSize: 12,
+    lineHeight: 1.3
+  };
+}
+
+function coalesceBufferedWrites(writes: BufferedTerminalWrite[]) {
+  const coalesced: CoalescedBufferedTerminalWrite[] = [];
+
+  for (const nextWrite of writes) {
+    const previousWrite = coalesced[coalesced.length - 1];
+
+    if (nextWrite.kind === "pty") {
+      if (previousWrite?.kind === "pty") {
+        previousWrite.chunks.push(nextWrite.data);
+        previousWrite.byteLength += nextWrite.data.length;
+        previousWrite.sourceCount += 1;
+        continue;
+      }
+
+      coalesced.push({
+        kind: "pty",
+        chunks: [nextWrite.data],
+        byteLength: nextWrite.data.length,
+        sourceCount: 1
+      });
+      continue;
+    }
+
+    if (previousWrite?.kind === "system") {
+      previousWrite.text += nextWrite.text;
+      previousWrite.sourceCount += 1;
+      continue;
+    }
+
+    coalesced.push({
+      kind: "system",
+      text: nextWrite.text,
+      sourceCount: 1
+    });
+  }
+
+  return coalesced;
+}
+
 export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
   const {
     session,
+    terminalHostInfo,
     entries,
     clearSignal,
     captureEnabled,
@@ -130,21 +285,31 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
   const renderedCountRef = useRef(0);
   const sessionStatusRef = useRef<CodexSessionStatus>(session.status);
   const sessionIdRef = useRef<string | null>(session.sessionId);
+  const terminalModeRef = useRef<TerminalMode | null>(session.terminalMode);
+  const terminalTypographyRef = useRef<TerminalTypography>(
+    getTerminalTypography(session.terminalMode)
+  );
   const captureEnabledRef = useRef(captureEnabled);
   const sendInputRef = useRef(onSendInput);
   const resizeTerminalRef = useRef(onResizeTerminal);
+  const lastInputKindRef = useRef<ReturnType<typeof classifyInput> | null>(null);
   const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const lastHostPixelsRef = useRef<{ width: number; height: number } | null>(null);
   const pendingHostPixelsRef = useRef<{ width: number; height: number } | null>(null);
   const writeQueueRef = useRef<BufferedTerminalWrite[]>([]);
   const isWriteFlushScheduledRef = useRef(false);
+  const writeFlushTimerRef = useRef<number | null>(null);
+  const writeFlushFirstQueuedAtRef = useRef<number | null>(null);
+  const writeFlushScheduledAtRef = useRef<number | null>(null);
+  const writeFlushRequestedDelayRef = useRef(0);
+  const paintRefreshFrameRef = useRef<number | null>(null);
   const windowsPtyRef = useRef<WindowsPtyInfo | null>(
     typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
       ? { backend: "conpty" }
       : null
   );
-  const latestHostInfoRef = useRef<TerminalHostInfoResponse | null>(null);
   const sequenceStateRef = useRef(createTerminalSequenceState());
+  const syncOutputStateRef = useRef(createTerminalSyncOutputState());
   const gapTimerRef = useRef<number | null>(null);
   const fitTimerRef = useRef<number | null>(null);
   const captureFlushTimerRef = useRef<number | null>(null);
@@ -152,6 +317,9 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
   const captureFlushInFlightRef = useRef(false);
   const isTerminalFocusedRef = useRef(false);
   const lastInputAtRef = useRef<number | null>(null);
+  const pendingResizeSinceRef = useRef<number | null>(null);
+  const previousSessionIdRef = useRef<string | null>(session.sessionId);
+  const previousClearSignalRef = useRef(clearSignal);
 
   const canStart = session.status === "idle" || session.status === "stopped" || session.status === "error";
   const canStop = session.status === "running" || session.status === "starting";
@@ -170,6 +338,17 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     }
   };
 
+  const clearWriteFlushTimer = () => {
+    if (writeFlushTimerRef.current !== null) {
+      window.clearTimeout(writeFlushTimerRef.current);
+      writeFlushTimerRef.current = null;
+    }
+
+    writeFlushFirstQueuedAtRef.current = null;
+    writeFlushScheduledAtRef.current = null;
+    writeFlushRequestedDelayRef.current = 0;
+  };
+
   const clearCaptureFlushTimer = () => {
     if (captureFlushTimerRef.current !== null) {
       window.clearTimeout(captureFlushTimerRef.current);
@@ -177,12 +356,23 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     }
   };
 
+  const clearPaintRefreshFrame = () => {
+    if (paintRefreshFrameRef.current !== null) {
+      window.cancelAnimationFrame(paintRefreshFrameRef.current);
+      paintRefreshFrameRef.current = null;
+    }
+  };
+
   const resetTransportState = () => {
     sequenceStateRef.current = createTerminalSequenceState();
+    syncOutputStateRef.current = createTerminalSyncOutputState();
     clearGapTimer();
+    clearWriteFlushTimer();
     writeQueueRef.current = [];
     isWriteFlushScheduledRef.current = false;
+    lastInputKindRef.current = null;
     pendingHostPixelsRef.current = null;
+    pendingResizeSinceRef.current = null;
     lastInputAtRef.current = null;
   };
 
@@ -261,7 +451,36 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     scheduleCaptureFlush();
   };
 
+  const scheduleTerminalPaintRefresh = (reason: string) => {
+    if (windowsPtyRef.current === null || paintRefreshFrameRef.current !== null) {
+      return;
+    }
+
+    paintRefreshFrameRef.current = window.requestAnimationFrame(() => {
+      paintRefreshFrameRef.current = null;
+      const terminal = terminalRef.current;
+      if (!terminal || terminal.rows <= 0) {
+        return;
+      }
+
+      terminal.refresh(0, terminal.rows - 1);
+      const snapshot = readTerminalSnapshot(terminal, hostRef.current);
+      enqueueCaptureEvent("frontend_terminal_refresh", {
+        reason,
+        cols: snapshot.cols,
+        rows: snapshot.rows,
+        cursor_x: snapshot.cursor_x,
+        cursor_y: snapshot.cursor_y,
+        viewport_y: snapshot.viewport_y,
+        base_y: snapshot.base_y
+      });
+    });
+  };
+
   const flushWriteQueue = () => {
+    const scheduledAtMs = writeFlushScheduledAtRef.current;
+    const requestedDelayMs = writeFlushRequestedDelayRef.current;
+    clearWriteFlushTimer();
     isWriteFlushScheduledRef.current = false;
 
     const terminal = terminalRef.current;
@@ -272,51 +491,186 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
     const pendingWrites = writeQueueRef.current.splice(0, writeQueueRef.current.length);
     if (pendingWrites.length === 0) {
+      writeFlushFirstQueuedAtRef.current = null;
       return;
     }
 
+    writeFlushFirstQueuedAtRef.current = null;
+
+    const coalescedWrites = coalesceBufferedWrites(pendingWrites);
     let ptyChunkCount = 0;
     let ptyBytes = 0;
     let systemWriteCount = 0;
+    const snapshotBefore = readTerminalSnapshot(terminal, hostRef.current);
+    const flushActualDelayMs =
+      scheduledAtMs === null ? 0 : Math.max(0, Date.now() - scheduledAtMs);
 
-    for (const nextWrite of pendingWrites) {
-      const payload = nextWrite.kind === "pty" ? nextWrite.data : formatSystemText(nextWrite.text);
-      terminal.write(payload);
-
+    pendingWrites.forEach((nextWrite) => {
       if (nextWrite.kind === "pty") {
         ptyChunkCount += 1;
         ptyBytes += nextWrite.data.length;
-      } else {
-        systemWriteCount += 1;
+        return;
       }
-    }
 
-    enqueueCaptureEvent("write_flushed", {
+      systemWriteCount += 1;
+    });
+
+    coalescedWrites.forEach((nextWrite, index) => {
+      const payload =
+        nextWrite.kind === "pty"
+          ? concatUint8Arrays(nextWrite.chunks, nextWrite.byteLength)
+          : formatSystemText(nextWrite.text);
+
+      terminal.write(payload, index === coalescedWrites.length - 1
+        ? () => {
+            const snapshotAfter = readTerminalSnapshot(terminalRef.current, hostRef.current);
+            const lineContextAfter = readTerminalLineContext(terminalRef.current);
+            enqueueCaptureEvent("frontend_write_applied", {
+              queue_depth_before: pendingWrites.length,
+              queue_depth_after: writeQueueRef.current.length,
+              pty_chunk_count: ptyChunkCount,
+              pty_bytes: ptyBytes,
+              system_write_count: systemWriteCount,
+              terminal_write_calls: coalescedWrites.length,
+              coalesced_write_count: pendingWrites.length - coalescedWrites.length,
+              requested_flush_delay_ms: requestedDelayMs,
+              actual_flush_delay_ms: flushActualDelayMs,
+              forced_refresh: false,
+              before_cols: snapshotBefore.cols,
+              before_rows: snapshotBefore.rows,
+              before_cursor_x: snapshotBefore.cursor_x,
+              before_cursor_y: snapshotBefore.cursor_y,
+              before_viewport_y: snapshotBefore.viewport_y,
+              before_base_y: snapshotBefore.base_y,
+              after_cols: snapshotAfter.cols,
+              after_rows: snapshotAfter.rows,
+              after_cursor_x: snapshotAfter.cursor_x,
+              after_cursor_y: snapshotAfter.cursor_y,
+              after_viewport_y: snapshotAfter.viewport_y,
+              after_base_y: snapshotAfter.base_y,
+              after_line_context: lineContextAfter
+            });
+          }
+        : undefined);
+    });
+
+    enqueueCaptureEvent("frontend_write_flushed", {
       queue_depth_before: pendingWrites.length,
       queue_depth_after: writeQueueRef.current.length,
       pty_chunk_count: ptyChunkCount,
       pty_bytes: ptyBytes,
-      system_write_count: systemWriteCount
+      system_write_count: systemWriteCount,
+      terminal_write_calls: coalescedWrites.length,
+      coalesced_write_count: pendingWrites.length - coalescedWrites.length,
+      requested_flush_delay_ms: requestedDelayMs,
+      actual_flush_delay_ms: flushActualDelayMs,
+      cols: snapshotBefore.cols,
+      rows: snapshotBefore.rows,
+      cursor_x: snapshotBefore.cursor_x,
+      cursor_y: snapshotBefore.cursor_y,
+      viewport_y: snapshotBefore.viewport_y,
+      base_y: snapshotBefore.base_y,
+      host_width: snapshotBefore.host_width,
+      host_height: snapshotBefore.host_height,
+      device_pixel_ratio: snapshotBefore.device_pixel_ratio
     });
   };
 
   const scheduleWriteFlush = () => {
+    const nowMs = Date.now();
+    const ptyByteLength = writeQueueRef.current.reduce((total, entry) => {
+      if (entry.kind !== "pty") {
+        return total;
+      }
+
+      return total + entry.data.length;
+    }, 0);
+    const hasPtyWrite = ptyByteLength > 0;
+    const currentTerminalMode = terminalModeRef.current;
+    const delayMs = getTerminalWriteFlushDelayMs({
+      terminalMode: currentTerminalMode,
+      hasPtyWrite,
+      ptyByteLength
+    });
+    const shouldDebounceForBackspace =
+      currentTerminalMode === "full_screen"
+      && hasPtyWrite
+      && lastInputKindRef.current === "backspace"
+      && lastInputAtRef.current !== null
+      && nowMs - lastInputAtRef.current <= FULL_SCREEN_BACKSPACE_WRITE_DEBOUNCE_IDLE_MS;
+    const shouldRescheduleForFullScreenPty =
+      currentTerminalMode === "full_screen" && hasPtyWrite;
+
     if (isWriteFlushScheduledRef.current) {
+      if (!shouldDebounceForBackspace && !shouldRescheduleForFullScreenPty) {
+        return;
+      }
+
+      const firstQueuedAtMs = writeFlushFirstQueuedAtRef.current ?? nowMs;
+      const maxHoldMs = shouldDebounceForBackspace
+        ? FULL_SCREEN_BACKSPACE_WRITE_MAX_HOLD_MS
+        : FULL_SCREEN_PTY_WRITE_MAX_HOLD_MS;
+      const remainingMaxDelayMs = Math.max(
+        0,
+        maxHoldMs - (nowMs - firstQueuedAtMs)
+      );
+      const nextDelayMs = Math.min(delayMs, remainingMaxDelayMs);
+      const shouldExtendScheduledFlush =
+        shouldDebounceForBackspace || nextDelayMs > writeFlushRequestedDelayRef.current;
+
+      if (!shouldExtendScheduledFlush) {
+        return;
+      }
+
+      if (writeFlushTimerRef.current !== null) {
+        window.clearTimeout(writeFlushTimerRef.current);
+        writeFlushTimerRef.current = null;
+      }
+
+      writeFlushScheduledAtRef.current = nowMs;
+      writeFlushRequestedDelayRef.current = nextDelayMs;
+      enqueueCaptureEvent("frontend_write_flush_rescheduled", {
+        reason: shouldDebounceForBackspace
+          ? "recent_backspace_input"
+          : "full_screen_pty_batching",
+        delay_ms: nextDelayMs,
+        remaining_max_delay_ms: remainingMaxDelayMs,
+        queue_depth: writeQueueRef.current.length,
+        pty_bytes: ptyByteLength
+      });
+
+      if (nextDelayMs <= 0 && typeof queueMicrotask === "function") {
+        queueMicrotask(() => {
+          flushWriteQueue();
+        });
+        return;
+      }
+
+      writeFlushTimerRef.current = window.setTimeout(() => {
+        writeFlushTimerRef.current = null;
+        flushWriteQueue();
+      }, nextDelayMs);
       return;
     }
 
     isWriteFlushScheduledRef.current = true;
+    if (writeFlushFirstQueuedAtRef.current === null) {
+      writeFlushFirstQueuedAtRef.current = nowMs;
+    }
+    writeFlushScheduledAtRef.current = nowMs;
+    writeFlushRequestedDelayRef.current = delayMs;
 
-    if (typeof queueMicrotask === "function") {
+    if (delayMs <= 0 && typeof queueMicrotask === "function") {
       queueMicrotask(() => {
         flushWriteQueue();
       });
       return;
     }
 
-    window.setTimeout(() => {
+    writeFlushTimerRef.current = window.setTimeout(() => {
+      writeFlushTimerRef.current = null;
       flushWriteQueue();
-    }, 0);
+    }, delayMs);
   };
 
   const enqueueBufferedWrite = (write: BufferedTerminalWrite) => {
@@ -342,6 +696,34 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     scheduleWriteFlush();
   };
 
+  const enqueueReadyWrite = (write: TerminalQueuedWrite) => {
+    if (write.kind !== "pty") {
+      enqueueBufferedWrite(write);
+      return;
+    }
+
+    const syncOutputUpdate = consumeTerminalSyncOutput(syncOutputStateRef.current, write.data);
+    syncOutputStateRef.current = syncOutputUpdate.state;
+
+    if (syncOutputUpdate.ready.length > 1) {
+      enqueueCaptureEvent("frontend_sync_output_flushed", {
+        emitted_chunk_count: syncOutputUpdate.ready.length,
+        emitted_byte_length: syncOutputUpdate.ready.reduce(
+          (total, chunk) => total + chunk.length,
+          0
+        )
+      });
+    }
+
+    for (const nextChunk of syncOutputUpdate.ready) {
+      enqueueBufferedWrite({
+        kind: "pty",
+        seq: write.seq,
+        data: nextChunk
+      });
+    }
+  };
+
   const scheduleGapFlush = () => {
     clearGapTimer();
 
@@ -358,7 +740,7 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
       if (update.skippedRange) {
         debugLog("sequence-gap-skipped", sessionIdRef.current, update.skippedRange);
-        enqueueCaptureEvent("sequence_gap_skipped", {
+        enqueueCaptureEvent("frontend_sequence_gap_skipped", {
           from_seq: update.skippedRange.fromSeq,
           to_seq: update.skippedRange.toSeq,
           pending_count: update.state.pending.length
@@ -366,7 +748,7 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
       }
 
       for (const readyWrite of update.ready) {
-        enqueueBufferedWrite(readyWrite);
+        enqueueReadyWrite(readyWrite);
       }
 
       scheduleGapFlush();
@@ -391,7 +773,7 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     sequenceStateRef.current = update.state;
     const writeSize = nextWrite.kind === "pty" ? nextWrite.data.length : nextWrite.text.length;
 
-    enqueueCaptureEvent("remote_chunk_received", {
+    enqueueCaptureEvent("frontend_remote_chunk_received", {
       seq: payload.seq,
       kind: payload.kind,
       size: writeSize,
@@ -410,7 +792,7 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     );
 
     for (const readyWrite of update.ready) {
-      enqueueBufferedWrite(readyWrite);
+      enqueueReadyWrite(readyWrite);
     }
 
     scheduleGapFlush();
@@ -435,7 +817,7 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
     lastSizeRef.current = { cols, rows };
     resizeTerminalRef.current(cols, rows);
-    enqueueCaptureEvent("terminal_resize_reported", {
+    enqueueCaptureEvent("frontend_terminal_resize_reported", {
       cols,
       rows
     });
@@ -452,23 +834,49 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     }
 
     const nowMs = Date.now();
+    const currentTerminalMode = terminalModeRef.current;
+    const idleThresholdMs = getTerminalIdleThresholdMs(currentTerminalMode);
+    const snapshotBeforeFit = readTerminalSnapshot(terminal, hostRef.current);
+    enqueueCaptureEvent("frontend_fit_requested", {
+      width: pendingHostPixels.width,
+      height: pendingHostPixels.height,
+      terminal_mode: currentTerminalMode,
+      idle_threshold_ms: idleThresholdMs,
+      cols: snapshotBeforeFit.cols,
+      rows: snapshotBeforeFit.rows,
+      cursor_x: snapshotBeforeFit.cursor_x,
+      cursor_y: snapshotBeforeFit.cursor_y,
+      viewport_y: snapshotBeforeFit.viewport_y,
+      base_y: snapshotBeforeFit.base_y
+    });
+
     if (
       shouldDeferTerminalResize({
         isFocused: isTerminalFocusedRef.current,
         lastInputAtMs: lastInputAtRef.current,
+        nowMs,
+        idleThresholdMs
+      })
+      && !shouldForceTerminalResize({
+        pendingSinceMs: pendingResizeSinceRef.current,
         nowMs
       })
     ) {
       const delayMs = getTerminalResizeDelayMs({
         lastInputAtMs: lastInputAtRef.current,
-        nowMs
+        nowMs,
+        idleThresholdMs
       });
       debugLog("fit-deferred", sessionIdRef.current, pendingHostPixels, "delayMs", delayMs);
-      enqueueCaptureEvent("fit_deferred", {
+      enqueueCaptureEvent("frontend_fit_deferred", {
         width: pendingHostPixels.width,
         height: pendingHostPixels.height,
         delay_ms: delayMs,
-        focused: isTerminalFocusedRef.current
+        focused: isTerminalFocusedRef.current,
+        cols: snapshotBeforeFit.cols,
+        rows: snapshotBeforeFit.rows,
+        cursor_x: snapshotBeforeFit.cursor_x,
+        cursor_y: snapshotBeforeFit.cursor_y
       });
       fitTimerRef.current = window.setTimeout(() => {
         applyFitIfReady();
@@ -478,6 +886,7 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
     const lastAppliedPixels = lastHostPixelsRef.current;
     pendingHostPixelsRef.current = null;
+    pendingResizeSinceRef.current = null;
     if (
       lastAppliedPixels &&
       lastAppliedPixels.width === pendingHostPixels.width &&
@@ -488,11 +897,17 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
     lastHostPixelsRef.current = pendingHostPixels;
     fitAddon.fit();
-    enqueueCaptureEvent("fit_applied", {
+    scheduleTerminalPaintRefresh("fit_applied");
+    const snapshotAfterFit = readTerminalSnapshot(terminal, hostRef.current);
+    enqueueCaptureEvent("frontend_fit_applied", {
       width: pendingHostPixels.width,
       height: pendingHostPixels.height,
       cols: terminal.cols,
-      rows: terminal.rows
+      rows: terminal.rows,
+      before_cursor_x: snapshotBeforeFit.cursor_x,
+      before_cursor_y: snapshotBeforeFit.cursor_y,
+      after_cursor_x: snapshotAfterFit.cursor_x,
+      after_cursor_y: snapshotAfterFit.cursor_y
     });
     reportTerminalSize();
   };
@@ -517,11 +932,44 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     }
 
     pendingHostPixelsRef.current = { width, height };
-    enqueueCaptureEvent("host_resize_observed", {
+    if (pendingResizeSinceRef.current === null) {
+      pendingResizeSinceRef.current = Date.now();
+    }
+
+    enqueueCaptureEvent("frontend_host_resize_observed", {
       width,
       height
     });
     scheduleFit();
+  };
+
+  const applyTerminalTypography = (terminalMode: TerminalMode | null) => {
+    const terminal = terminalRef.current;
+    const nextTypography = getTerminalTypography(terminalMode);
+    const previousTypography = terminalTypographyRef.current;
+    terminalTypographyRef.current = nextTypography;
+
+    if (!terminal) {
+      return;
+    }
+
+    const fontSizeChanged = terminal.options.fontSize !== nextTypography.fontSize;
+    const lineHeightChanged = terminal.options.lineHeight !== nextTypography.lineHeight;
+    if (!fontSizeChanged && !lineHeightChanged) {
+      return;
+    }
+
+    terminal.options.fontSize = nextTypography.fontSize;
+    terminal.options.lineHeight = nextTypography.lineHeight;
+    lastHostPixelsRef.current = null;
+    enqueueCaptureEvent("frontend_terminal_typography_updated", {
+      terminal_mode: terminalMode,
+      previous_density: previousTypography.density,
+      density: nextTypography.density,
+      font_size: nextTypography.fontSize,
+      line_height: nextTypography.lineHeight
+    });
+    queueFitToHost();
   };
 
   useLayoutEffect(() => {
@@ -531,6 +979,14 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
   useLayoutEffect(() => {
     sessionIdRef.current = session.sessionId;
   }, [session.sessionId]);
+
+  useLayoutEffect(() => {
+    terminalModeRef.current = session.terminalMode;
+  }, [session.terminalMode]);
+
+  useLayoutEffect(() => {
+    windowsPtyRef.current = terminalHostInfo?.windowsPty ?? windowsPtyRef.current;
+  }, [terminalHostInfo]);
 
   useEffect(() => {
     captureEnabledRef.current = captureEnabled;
@@ -548,19 +1004,24 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
   }, [onResizeTerminal]);
 
   useEffect(() => {
+    applyTerminalTypography(session.terminalMode);
+  }, [session.terminalMode]);
+
+  useEffect(() => {
     if (!hostRef.current) {
       return;
     }
 
+    const initialTypography = getTerminalTypography(session.terminalMode);
+    terminalTypographyRef.current = initialTypography;
     const terminal = new Terminal({
       convertEol: false,
-      windowsPty: windowsPtyRef.current ?? undefined,
       cursorBlink: false,
       cursorStyle: "bar",
       cursorWidth: 1,
       fontFamily: "IBM Plex Mono, Cascadia Mono, monospace",
-      fontSize: 12,
-      lineHeight: 1.3,
+      fontSize: initialTypography.fontSize,
+      lineHeight: initialTypography.lineHeight,
       theme: {
         background: "#171b22",
         foreground: "#dbe2ef"
@@ -574,10 +1035,6 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
-    if (windowsPtyRef.current) {
-      terminal.options.windowsPty = windowsPtyRef.current;
-    }
-
     queueFitToHost();
 
     const dataDisposable = terminal.onData((input) => {
@@ -585,22 +1042,53 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
         return;
       }
 
+      const inputKind = classifyInput(input);
       lastInputAtRef.current = Date.now();
-      enqueueCaptureEvent("input_sent", {
+      lastInputKindRef.current = inputKind;
+      const snapshot = readTerminalSnapshot(terminalRef.current, hostRef.current);
+      enqueueCaptureEvent("frontend_input_sent", {
+        input_kind: inputKind,
         byte_length: new TextEncoder().encode(input).length,
-        input_base64: encodeTextToBase64(input)
+        input_base64: encodeTextToBase64(input),
+        cols: snapshot.cols,
+        rows: snapshot.rows,
+        cursor_x: snapshot.cursor_x,
+        cursor_y: snapshot.cursor_y,
+        viewport_y: snapshot.viewport_y,
+        base_y: snapshot.base_y,
+        host_width: snapshot.host_width,
+        host_height: snapshot.host_height
       });
       sendInputRef.current(input);
+    });
+
+    const resizeDisposable = terminal.onResize((size) => {
+      const snapshot = readTerminalSnapshot(terminalRef.current, hostRef.current);
+      enqueueCaptureEvent("frontend_xterm_resized", {
+        cols: size.cols,
+        rows: size.rows,
+        cursor_x: snapshot.cursor_x,
+        cursor_y: snapshot.cursor_y,
+        viewport_y: snapshot.viewport_y,
+        base_y: snapshot.base_y,
+        host_width: snapshot.host_width,
+        host_height: snapshot.host_height,
+        device_pixel_ratio: snapshot.device_pixel_ratio
+      });
     });
 
     const hostElement = hostRef.current;
     const handleFocusIn = () => {
       isTerminalFocusedRef.current = true;
-      enqueueCaptureEvent("focus", {});
+      enqueueCaptureEvent("frontend_focus_changed", {
+        focused: true
+      });
     };
     const handleFocusOut = () => {
       isTerminalFocusedRef.current = false;
-      enqueueCaptureEvent("blur", {});
+      enqueueCaptureEvent("frontend_focus_changed", {
+        focused: false
+      });
       scheduleFit(0);
     };
 
@@ -614,12 +1102,15 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
     return () => {
       dataDisposable.dispose();
+      resizeDisposable.dispose();
       hostElement.removeEventListener("focusin", handleFocusIn);
       hostElement.removeEventListener("focusout", handleFocusOut);
       resizeObserver.disconnect();
       clearGapTimer();
       clearFitTimer();
+      clearWriteFlushTimer();
       clearCaptureFlushTimer();
+      clearPaintRefreshFrame();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -627,35 +1118,12 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
       lastSizeRef.current = null;
       lastHostPixelsRef.current = null;
       pendingHostPixelsRef.current = null;
+      pendingResizeSinceRef.current = null;
       writeQueueRef.current = [];
       isWriteFlushScheduledRef.current = false;
       captureQueueRef.current = [];
       captureFlushInFlightRef.current = false;
     };
-  }, []);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      return;
-    }
-
-    void invoke<TerminalHostInfoResponse>("get_terminal_host_info")
-      .then((hostInfo) => {
-        latestHostInfoRef.current = hostInfo;
-        windowsPtyRef.current = mapWindowsPtyInfo(hostInfo) ?? windowsPtyRef.current;
-        const terminal = terminalRef.current;
-        if (terminal && windowsPtyRef.current) {
-          terminal.options.windowsPty = windowsPtyRef.current;
-          debugLog("windows-pty", windowsPtyRef.current);
-        }
-
-        enqueueCaptureEvent("terminal_host_info", {
-          windows_pty: hostInfo.windows_pty
-        });
-      })
-      .catch((error) => {
-        debugLog("windows-pty-unavailable", error);
-      });
   }, []);
 
   useEffect(() => {
@@ -700,19 +1168,11 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
   }, []);
 
   useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) {
-      return;
-    }
-
-    enqueueCaptureEvent("terminal_reset", {
-      reason: "clear_signal"
+    enqueueCaptureEvent("frontend_terminal_host_info", {
+      windows_pty: terminalHostInfo?.windowsPty ?? null,
+      windows_pty_applied: false
     });
-    terminal.clear();
-    terminal.reset();
-    renderedCountRef.current = 0;
-    resetTransportState();
-  }, [clearSignal]);
+  }, [terminalHostInfo]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -720,22 +1180,46 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
       return;
     }
 
-    resetCaptureQueue();
+    const resetReason = getTerminalVisualResetReason({
+      previousSessionId: previousSessionIdRef.current,
+      nextSessionId: session.sessionId,
+      clearSignalChanged: clearSignal !== previousClearSignalRef.current
+    });
+
+    previousSessionIdRef.current = session.sessionId;
+    previousClearSignalRef.current = clearSignal;
+
+    if (!resetReason) {
+      return;
+    }
+
+    if (resetReason === "session_attached") {
+      resetCaptureQueue();
+    }
+
+    enqueueCaptureEvent("frontend_terminal_reset", {
+      reason: resetReason,
+      session_id: session.sessionId,
+      terminal_mode: session.terminalMode,
+      windows_pty: terminalHostInfo?.windowsPty ?? null
+    });
     terminal.clear();
     terminal.reset();
+    scheduleTerminalPaintRefresh("terminal_reset");
     renderedCountRef.current = 0;
     resetTransportState();
     lastHostPixelsRef.current = null;
     queueFitToHost();
 
-    if (session.sessionId) {
-      enqueueCaptureEvent("session_attached", {
+    if (resetReason === "session_attached" && session.sessionId) {
+      enqueueCaptureEvent("frontend_session_attached", {
         session_id: session.sessionId,
         status: session.status,
-        windows_pty: latestHostInfoRef.current?.windows_pty ?? null
+        terminal_mode: session.terminalMode,
+        windows_pty: terminalHostInfo?.windowsPty ?? null
       });
     }
-  }, [session.sessionId]);
+  }, [clearSignal, session.sessionId, session.status, session.terminalMode, terminalHostInfo]);
 
   useEffect(() => {
     if (entries.length < renderedCountRef.current) {
@@ -768,6 +1252,8 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
     return "tone-neutral";
   }, [session.status]);
 
+  const terminalDensity = session.terminalMode === "full_screen" ? "dense" : "comfortable";
+
   return (
     <section className="codex-terminal-panel" aria-label="Codex terminal">
       <header className="codex-terminal-toolbar">
@@ -785,12 +1271,11 @@ export function CodexTerminalPanel(props: CodexTerminalPanelProps) {
 
         <div className="codex-terminal-toolbar-group">
           <span className={`codex-terminal-status ${statusToneClass}`}>{statusLabel(session)}</span>
-          <span className="muted codex-terminal-message">{session.message}</span>
         </div>
       </header>
 
-      <div className="codex-terminal-surface">
-        <div ref={hostRef} className="codex-terminal-host" />
+      <div className="codex-terminal-surface" data-density={terminalDensity}>
+        <div ref={hostRef} className="codex-terminal-host" data-density={terminalDensity} />
       </div>
     </section>
   );

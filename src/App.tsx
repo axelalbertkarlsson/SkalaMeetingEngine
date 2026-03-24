@@ -8,7 +8,8 @@ import { RenameDialog } from "./components/shell/RenameDialog";
 import {
   CodexTerminalPanel,
   type CodexSessionState,
-  type CodexTerminalEntry
+  type CodexTerminalEntry,
+  type TerminalHostInfo
 } from "./components/shell/CodexTerminalPanel";
 import {
   CollapsibleSidebar,
@@ -76,6 +77,13 @@ interface SpawnCodexProcessResponse {
   session_id: string;
   status: string;
   message: string;
+  terminal_mode: "full_screen" | "compact";
+  terminal_host: {
+    windows_pty: {
+      backend: "conpty" | "winpty";
+      build_number?: number | null;
+    } | null;
+  };
   capture_bundle_path?: string | null;
 }
 
@@ -91,7 +99,24 @@ interface TerminalExitEventPayload {
   capture_bundle_path?: string | null;
 }
 
+interface TerminalLifecycleEventPayload {
+  session_id: string;
+  phase: "session_started" | "first_pty_output" | "stop_requested" | "resize_applied" | "exit_observed";
+  timestamp_ms: number;
+  terminal_mode: "full_screen" | "compact";
+  terminal_host: {
+    windows_pty: {
+      backend: "conpty" | "winpty";
+      build_number?: number | null;
+    } | null;
+  };
+  cols?: number | null;
+  rows?: number | null;
+  capture_bundle_path?: string | null;
+}
+
 const TERMINAL_EXIT_EVENT = "codex://terminal-exit";
+const TERMINAL_LIFECYCLE_EVENT = "codex://terminal-lifecycle";
 
 interface WorkspaceTabState {
   id: string;
@@ -438,6 +463,26 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+const BOTTOM_PANEL_MIN_HEIGHT = 140;
+const APP_STATUS_BAR_HEIGHT = 28;
+const MIN_WORKSPACE_VIEW_HEIGHT = 140;
+
+function getBottomPanelMaxHeight(viewportHeight: number) {
+  const maxVisibleHeight = Math.max(0, viewportHeight - APP_STATUS_BAR_HEIGHT);
+  const preferredHeight = Math.max(
+    BOTTOM_PANEL_MIN_HEIGHT,
+    viewportHeight - (APP_STATUS_BAR_HEIGHT + MIN_WORKSPACE_VIEW_HEIGHT)
+  );
+
+  return Math.min(maxVisibleHeight, preferredHeight);
+}
+
+function clampBottomPanelHeight(height: number, viewportHeight: number) {
+  const maxHeight = getBottomPanelMaxHeight(viewportHeight);
+  const minHeight = Math.min(BOTTOM_PANEL_MIN_HEIGHT, maxHeight);
+  return Math.round(clamp(height, minHeight, maxHeight));
+}
+
 function createSectionTab(sectionId: SectionId): WorkspaceTabState {
   return {
     id: `tab-${sectionId}`,
@@ -469,6 +514,22 @@ function sortRunsByStartedAt(items: Run[]) {
 
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function mapTerminalHostInfo(hostInfo: {
+  windows_pty: {
+    backend: "conpty" | "winpty";
+    build_number?: number | null;
+  } | null;
+}): TerminalHostInfo {
+  return {
+    windowsPty: hostInfo.windows_pty
+      ? {
+          backend: hostInfo.windows_pty.backend,
+          buildNumber: hostInfo.windows_pty.build_number ?? undefined
+        }
+      : null
+  };
 }
 
 function isActiveRunStatus(status: RunStatus) {
@@ -508,6 +569,13 @@ function App() {
     "shell.bottomHeight",
     188
   );
+  const effectiveBottomPanelHeight = useMemo(() => {
+    if (typeof window === "undefined") {
+      return bottomPanelHeight;
+    }
+
+    return clampBottomPanelHeight(bottomPanelHeight, window.innerHeight);
+  }, [bottomPanelHeight]);
 
   const [tabs, setTabs] = useState<WorkspaceTabState[]>([createSectionTab("home")]);
   const [activeTabId, setActiveTabId] = useState<string>("tab-home");
@@ -545,8 +613,13 @@ function App() {
     sessionId: null,
     status: "idle",
     message: "Ready",
-    lastExitCode: null
+    lastExitCode: null,
+    terminalMode: null,
+    captureBundlePath: null,
+    lastLifecyclePhase: null,
+    lastResize: null
   });
+  const [codexTerminalHostInfo, setCodexTerminalHostInfo] = useState<TerminalHostInfo | null>(null);
   const [codexTerminalEntries, setCodexTerminalEntries] = useState<CodexTerminalEntry[]>([]);
   const [codexTerminalClearSignal, setCodexTerminalClearSignal] = useState(0);
   const [codexCommandPath, setCodexCommandPath] = useLocalStorageState<string>(
@@ -555,7 +628,7 @@ function App() {
   );
   const [codexDisableAltScreen, setCodexDisableAltScreen] = useLocalStorageState<boolean>(
     "settings.codex.disableAltScreen",
-    true
+    false
   );
   const [codexCaptureDebugBundle, setCodexCaptureDebugBundle] = useLocalStorageState<boolean>(
     "settings.codex.captureDebugBundle",
@@ -1072,11 +1145,48 @@ function App() {
       return;
     }
 
+    void invoke<SpawnCodexProcessResponse["terminal_host"]>("get_terminal_host_info")
+      .then((hostInfo) => {
+        setCodexTerminalHostInfo(mapTerminalHostInfo(hostInfo));
+      })
+      .catch(() => {
+        setCodexTerminalHostInfo(null);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
     const unlistenFns: UnlistenFn[] = [];
     let disposed = false;
 
     const attachListeners = async () => {
       try {
+        const unlistenLifecycle = await listen<TerminalLifecycleEventPayload>(TERMINAL_LIFECYCLE_EVENT, (event) => {
+          setCodexTerminalHostInfo(mapTerminalHostInfo(event.payload.terminal_host));
+
+          setCodexSession((current) => {
+            if (current.sessionId !== event.payload.session_id) {
+              return current;
+            }
+
+            return {
+              ...current,
+              terminalMode: event.payload.terminal_mode,
+              captureBundlePath: event.payload.capture_bundle_path ?? current.captureBundlePath,
+              lastLifecyclePhase: event.payload.phase,
+              lastResize:
+                event.payload.phase === "resize_applied" &&
+                typeof event.payload.cols === "number" &&
+                typeof event.payload.rows === "number"
+                  ? { cols: event.payload.cols, rows: event.payload.rows }
+                  : current.lastResize
+            };
+          });
+        });
+
         const unlistenExit = await listen<TerminalExitEventPayload>(TERMINAL_EXIT_EVENT, (event) => {
           setCodexSession((current) => {
             if (current.sessionId !== event.payload.session_id) {
@@ -1084,12 +1194,14 @@ function App() {
             }
 
             return {
-              sessionId: current.sessionId,
+              ...current,
               status: "stopped",
               message: event.payload.capture_bundle_path
                 ? `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}. Capture bundle: ${event.payload.capture_bundle_path}`
                 : `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}.`,
-              lastExitCode: event.payload.code
+              lastExitCode: event.payload.code,
+              captureBundlePath: event.payload.capture_bundle_path ?? current.captureBundlePath,
+              lastLifecyclePhase: "exit_observed"
             };
           });
 
@@ -1103,10 +1215,12 @@ function App() {
         });
 
         if (disposed) {
+          unlistenLifecycle();
           unlistenExit();
           return;
         }
 
+        unlistenFns.push(unlistenLifecycle);
         unlistenFns.push(unlistenExit);
       } catch (error) {
         appendTerminalEntry({
@@ -1125,6 +1239,23 @@ function App() {
       });
     };
   }, [appendTerminalEntry]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const syncBottomPanelHeight = () => {
+      const nextHeight = clampBottomPanelHeight(bottomPanelHeight, window.innerHeight);
+      if (nextHeight !== bottomPanelHeight) {
+        setBottomPanelHeight(nextHeight);
+      }
+    };
+
+    syncBottomPanelHeight();
+    window.addEventListener("resize", syncBottomPanelHeight);
+    return () => window.removeEventListener("resize", syncBottomPanelHeight);
+  }, [bottomPanelHeight, setBottomPanelHeight]);
 
   const activeSidebarGroups = sidebarGroupsBySection[activeSection];
   const selectedSidebarItemId = (() => {
@@ -1622,19 +1753,23 @@ function App() {
       setBottomPanelOpen(true);
       setActiveBottomViewId("terminal");
       setCodexTerminalEntries([]);
-      setCodexTerminalClearSignal((current) => current + 1);
       setCodexSession((current) => ({
         ...current,
         status: "starting",
         message: "Starting Codex process...",
-        lastExitCode: null
+        lastExitCode: null,
+        terminalMode: codexDisableAltScreen ? "compact" : "full_screen",
+        captureBundlePath: null,
+        lastLifecyclePhase: null,
+        lastResize: null
       }));
 
       if (!isTauriRuntime()) {
         setCodexSession((current) => ({
           ...current,
           status: "error",
-          message: "Tauri runtime unavailable (web dev mode)."
+          message: "Tauri runtime unavailable (web dev mode).",
+          terminalMode: null
         }));
         appendTerminalEntry({
           sessionId: "local-preview",
@@ -1659,8 +1794,13 @@ function App() {
           message: response.capture_bundle_path
             ? `${response.message} Capture bundle: ${response.capture_bundle_path}`
             : response.message,
-          lastExitCode: null
+          lastExitCode: null,
+          terminalMode: response.terminal_mode,
+          captureBundlePath: response.capture_bundle_path ?? null,
+          lastLifecyclePhase: "session_started",
+          lastResize: null
         });
+        setCodexTerminalHostInfo(mapTerminalHostInfo(response.terminal_host));
 
         if (response.capture_bundle_path) {
           appendTerminalEntry({
@@ -1894,7 +2034,21 @@ function App() {
             { label: "Workspace", value: workspace.rootPath },
             { label: "Session", value: codexSession.sessionId ?? "None" },
             { label: "Status", value: codexSession.status },
-            { label: "Output mode", value: "Bottom panel terminal stream" }
+            {
+              label: "Terminal mode",
+              value:
+                codexSession.terminalMode === "compact"
+                  ? "Compact fallback"
+                  : codexSession.terminalMode === "full_screen"
+                    ? "Full-screen primary"
+                    : "Not started"
+            },
+            {
+              label: "PTY host",
+              value: codexTerminalHostInfo?.windowsPty
+                ? `${codexTerminalHostInfo.windowsPty.backend} ${codexTerminalHostInfo.windowsPty.buildNumber ?? ""}`.trim()
+                : "Unavailable"
+            }
           ]
         },
         {
@@ -1902,7 +2056,13 @@ function App() {
           title: "Bridge state",
           rows: [
             { label: "System entries", value: String(codexTerminalEntries.length) },
-            { label: "Last exit", value: codexSession.lastExitCode === null ? "N/A" : String(codexSession.lastExitCode) }
+            { label: "Last exit", value: codexSession.lastExitCode === null ? "N/A" : String(codexSession.lastExitCode) },
+            { label: "Lifecycle", value: codexSession.lastLifecyclePhase ?? "idle" },
+            {
+              label: "Last size",
+              value: codexSession.lastResize ? `${codexSession.lastResize.cols}x${codexSession.lastResize.rows}` : "N/A"
+            },
+            { label: "Capture", value: codexSession.captureBundlePath ?? "Disabled" }
           ]
         }
       ];
@@ -1935,7 +2095,18 @@ function App() {
         ]
       }
     ];
-  }, [contentSection, runStats, selectedDocumentFolderLabel, selectedSidebarItemId, sortedRuns, theme, workspace]);
+  }, [
+    codexSession,
+    codexTerminalEntries.length,
+    codexTerminalHostInfo,
+    contentSection,
+    runStats,
+    selectedDocumentFolderLabel,
+    selectedSidebarItemId,
+    sortedRuns,
+    theme,
+    workspace
+  ]);
 
   const bottomPanelViews = useMemo<BottomPanelView[]>(() => {
     const views: BottomPanelView[] = [
@@ -1946,7 +2117,7 @@ function App() {
           `[status] Section: ${sectionTitles[contentSection]}`,
           `[status] Sidebar: ${sidebarCollapsed ? "collapsed" : "open"} (${Math.round(sidebarWidth)}px)`,
           `[status] Inspector: ${inspectorOpen ? "open" : "closed"} (${Math.round(inspectorWidth)}px)`,
-          `[status] Bottom panel: ${bottomPanelOpen ? "open" : "closed"} (${Math.round(bottomPanelHeight)}px)`
+          `[status] Bottom panel: ${bottomPanelOpen ? "open" : "closed"} (${Math.round(effectiveBottomPanelHeight)}px)`
         ]
       },
       {
@@ -1965,7 +2136,14 @@ function App() {
         lines: [
           "$ codex --workspace .",
           "Interactive stream is now available in the Terminal tab on the Codex screen.",
-          `Session status: ${codexSession.status}`
+          `Session status: ${codexSession.status}`,
+          `Terminal mode: ${
+            codexSession.terminalMode === "compact"
+              ? "Compact fallback"
+              : codexSession.terminalMode === "full_screen"
+                ? "Full-screen primary"
+                : "Not started"
+          }`
         ]
       }
     ];
@@ -1977,6 +2155,7 @@ function App() {
         content: (
           <CodexTerminalPanel
             session={codexSession}
+            terminalHostInfo={codexTerminalHostInfo}
             entries={codexTerminalEntries}
             clearSignal={codexTerminalClearSignal}
             captureEnabled={codexCaptureDebugBundle}
@@ -1992,9 +2171,10 @@ function App() {
 
     return views;
   }, [
-    bottomPanelHeight,
+    effectiveBottomPanelHeight,
     bottomPanelOpen,
     codexCaptureDebugBundle,
+    codexTerminalHostInfo,
     codexSession,
     codexTerminalClearSignal,
     codexTerminalEntries,
@@ -2246,12 +2426,11 @@ function App() {
 
     event.preventDefault();
     const startY = event.clientY;
-    const startHeight = bottomPanelHeight;
+    const startHeight = effectiveBottomPanelHeight;
     document.body.style.cursor = "row-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const maxBottomHeight = Math.max(220, window.innerHeight - 140);
-      const nextHeight = Math.round(clamp(startHeight + (startY - moveEvent.clientY), 140, maxBottomHeight));
+      const nextHeight = clampBottomPanelHeight(startHeight + (startY - moveEvent.clientY), window.innerHeight);
       setBottomPanelHeight(nextHeight);
     };
 
@@ -2359,13 +2538,13 @@ function App() {
       <AppShell
       sidebarCollapsed={sidebarCollapsed}
       sidebarWidth={sidebarWidth}
-      inspectorOpen={inspectorOpen}
-      inspectorWidth={inspectorWidth}
-      bottomPanelOpen={bottomPanelOpen}
-      bottomPanelHeight={bottomPanelHeight}
-      onSidebarResizeStart={beginSidebarResize}
-      onInspectorResizeStart={beginInspectorResize}
-      onBottomPanelResizeStart={beginBottomResize}
+        inspectorOpen={inspectorOpen}
+        inspectorWidth={inspectorWidth}
+        bottomPanelOpen={bottomPanelOpen}
+        bottomPanelHeight={effectiveBottomPanelHeight}
+        onSidebarResizeStart={beginSidebarResize}
+        onInspectorResizeStart={beginInspectorResize}
+        onBottomPanelResizeStart={beginBottomResize}
       rail={
         <RibbonRail
           sections={railSections}

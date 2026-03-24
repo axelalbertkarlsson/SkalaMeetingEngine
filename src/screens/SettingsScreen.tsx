@@ -134,7 +134,7 @@ export function SettingsScreen({
         { label: "Execution mode", value: "Local subprocess" },
         { label: "Workspace binding", value: workspace.rootPath },
         { label: "Configured command", value: codexCommandPath || "codex" },
-        { label: "Terminal mode", value: codexDisableAltScreen ? "Compact (--no-alt-screen)" : "Full screen" },
+        { label: "Terminal mode", value: codexDisableAltScreen ? "Compact fallback (--no-alt-screen)" : "Full-screen primary" },
         { label: "Debug capture", value: codexCaptureDebugBundle ? "Enabled" : "Disabled" }
       ]
     }
@@ -301,10 +301,10 @@ export function SettingsScreen({
                 checked={codexDisableAltScreen}
                 onChange={(event) => onCodexDisableAltScreenChange(event.target.checked)}
               />
-              Use compact mode (<code>--no-alt-screen</code>)
+              Use compact fallback mode (<code>--no-alt-screen</code>)
             </label>
             <p className="muted settings-help-copy">
-              Compact mode can reduce full-screen redraws in the dock. Turn it off for native full-screen Codex UI.
+              Full-screen Codex UI is the primary embedded mode. Turn this on only when you want the manual compact fallback for redraw troubleshooting.
             </p>
           </div>
 
