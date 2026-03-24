@@ -2,26 +2,43 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   appendTextToConversationEntry,
-  buildCodexPrompt,
   clearComposerAfterSuccessfulSend,
   createCodexConversationEntryFromItem,
   createCodexEventEntry,
-  planCodexSend,
+  createCodexQueuedSend,
   upsertCodexContextItem,
   upsertConversationEntry,
   type CodexQueuedSend
 } from "../lib/codexContext.js";
 import {
+  archiveCodexThread,
   connectCodexAppServer,
+  listCodexThreads,
+  readCodexThread,
   respondToCodexServerRequest,
+  resumeCodexThread,
   sendCodexTurn,
+  startCodexThread,
   stopCodexAppServer
 } from "../lib/codexApi.js";
+import {
+  createInitialCodexThreadLocalState,
+  EMPTY_CODEX_THREAD_LOCAL_STORE,
+  extractCodexThreadDetails,
+  extractCodexThreadSummary,
+  getCodexThreadLocalStoreKey,
+  resolveCodexThreadTitle,
+  sanitizeCodexThreadLocalStore,
+  sortCodexThreads
+} from "../lib/codexThreads.js";
 import type {
   CodexAppEventPayload,
   CodexContextItem,
   CodexConversationEntry,
-  CodexSessionState
+  CodexSessionState,
+  CodexThreadLocalState,
+  CodexThreadLocalStore,
+  CodexThreadSummary
 } from "../models/codex.js";
 
 const CODEX_APP_EVENT = "codex://app-event";
@@ -41,6 +58,18 @@ interface PendingUserInputRequest {
   }>;
 }
 
+interface DetachedComposerState {
+  draft: string;
+  contextItems: CodexContextItem[];
+  lastSubmittedPrompt: string | null;
+}
+
+interface UseCodexControllerOptions {
+  workspaceRoot: string;
+  commandPath: string;
+  captureDebugBundle: boolean;
+}
+
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -48,11 +77,19 @@ function isTauriRuntime() {
 function createInitialSessionState(): CodexSessionState {
   return {
     connectionId: null,
-    threadId: null,
+    activeThreadId: null,
     activeTurnId: null,
     status: "idle",
     message: "Ready",
     lastEventMethod: null
+  };
+}
+
+function createDetachedComposerState(): DetachedComposerState {
+  return {
+    draft: "",
+    contextItems: [],
+    lastSubmittedPrompt: null
   };
 }
 
@@ -88,38 +125,61 @@ function extractThreadId(payload: unknown) {
   return null;
 }
 
-interface UseCodexControllerOptions {
-  workspaceRoot: string;
-  commandPath: string;
-  captureDebugBundle: boolean;
-}
-
 export function useCodexController({
   workspaceRoot,
   commandPath,
   captureDebugBundle: _captureDebugBundle
 }: UseCodexControllerOptions) {
   const [session, setSession] = useState<CodexSessionState>(createInitialSessionState);
+  const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
+  const [threadsLoading, setThreadsLoading] = useState(false);
+  const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
   const [conversationEntries, setConversationEntries] = useState<CodexConversationEntry[]>([]);
-  const [draft, setDraft] = useState("");
-  const [contextItems, setContextItems] = useState<CodexContextItem[]>([]);
   const [highlightedContextItemId, setHighlightedContextItemId] = useState<string | null>(null);
   const [pendingSend, setPendingSend] = useState<CodexQueuedSend | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [pendingUserInputRequest, setPendingUserInputRequest] = useState<PendingUserInputRequest | null>(null);
-  const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState<string | null>(null);
+  const [threadLocalStore, setThreadLocalStore] = useState<CodexThreadLocalStore>(() => {
+    if (typeof window === "undefined") {
+      return EMPTY_CODEX_THREAD_LOCAL_STORE;
+    }
+
+    const raw = window.localStorage.getItem(getCodexThreadLocalStoreKey(workspaceRoot));
+    if (!raw) {
+      return EMPTY_CODEX_THREAD_LOCAL_STORE;
+    }
+
+    try {
+      return sanitizeCodexThreadLocalStore(JSON.parse(raw));
+    } catch {
+      return EMPTY_CODEX_THREAD_LOCAL_STORE;
+    }
+  });
+  const [detachedComposerState, setDetachedComposerState] = useState<DetachedComposerState>(
+    createDetachedComposerState
+  );
 
   const sessionRef = useRef(session);
-  const pendingSendRef = useRef<CodexQueuedSend | null>(null);
-  const newChatRequestedRef = useRef(false);
+  const connectPromiseRef = useRef<Promise<string | null> | null>(null);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
 
   useEffect(() => {
-    pendingSendRef.current = pendingSend;
-  }, [pendingSend]);
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      getCodexThreadLocalStoreKey(workspaceRoot),
+      JSON.stringify(threadLocalStore)
+    );
+  }, [threadLocalStore, workspaceRoot]);
+
+  useEffect(() => {
+    setThreads((current) => sortCodexThreads(current, threadLocalStore));
+  }, [threadLocalStore]);
 
   useEffect(() => {
     if (!highlightedContextItemId) {
@@ -135,6 +195,20 @@ export function useCodexController({
     return () => window.clearTimeout(timeoutId);
   }, [highlightedContextItemId]);
 
+  const activeThreadLocalState = useMemo(() => {
+    if (!session.activeThreadId) {
+      return null;
+    }
+
+    return threadLocalStore.threads[session.activeThreadId] ?? createInitialCodexThreadLocalState();
+  }, [session.activeThreadId, threadLocalStore.threads]);
+
+  const draft = activeThreadLocalState?.draft ?? detachedComposerState.draft;
+  const contextItems = activeThreadLocalState?.contextItems ?? detachedComposerState.contextItems;
+  const lastSubmittedPrompt =
+    activeThreadLocalState?.lastSubmittedPrompt ?? detachedComposerState.lastSubmittedPrompt;
+  const canSend = Boolean(createCodexQueuedSend(draft, contextItems));
+
   const appendConversationEntry = useCallback((entry: CodexConversationEntry) => {
     setConversationEntries((current) => limitConversationEntries([...current, entry]));
   }, []);
@@ -143,8 +217,496 @@ export function useCodexController({
     setComposerFocusSignal((current) => current + 1);
   }, []);
 
+  const upsertThreadLocalState = useCallback(
+    (threadId: string, updater: (current: CodexThreadLocalState) => CodexThreadLocalState) => {
+      setThreadLocalStore((current) => ({
+        ...current,
+        threads: {
+          ...current.threads,
+          [threadId]: updater(current.threads[threadId] ?? createInitialCodexThreadLocalState())
+        }
+      }));
+    },
+    []
+  );
+
+  const updateCurrentComposerState = useCallback(
+    (updater: (current: DetachedComposerState | CodexThreadLocalState) => DetachedComposerState | CodexThreadLocalState) => {
+      const activeThreadId = sessionRef.current.activeThreadId;
+      if (!activeThreadId) {
+        setDetachedComposerState((current) => updater(current) as DetachedComposerState);
+        return;
+      }
+
+      upsertThreadLocalState(activeThreadId, (current) => updater(current) as CodexThreadLocalState);
+    },
+    [upsertThreadLocalState]
+  );
+
+  const setDraft = useCallback(
+    (value: string) => {
+      updateCurrentComposerState((current) => ({
+        ...current,
+        draft: value
+      }));
+    },
+    [updateCurrentComposerState]
+  );
+
+  const refreshThreads = useCallback(
+    async (connectionId = sessionRef.current.connectionId) => {
+      if (!connectionId) {
+        setThreads([]);
+        return [];
+      }
+
+      setThreadsLoading(true);
+
+      try {
+        const rawThreads = await listCodexThreads({
+          connectionId,
+          cwd: workspaceRoot
+        });
+        const summaries = rawThreads
+          .map((thread) => extractCodexThreadSummary(thread))
+          .filter((thread): thread is CodexThreadSummary => thread !== null)
+          .filter((thread) => !thread.archived);
+        const nextThreads = sortCodexThreads(
+          summaries.map((thread) => ({
+            ...thread,
+            name: resolveCodexThreadTitle(thread, threadLocalStore.threads[thread.id])
+          })),
+          threadLocalStore
+        );
+        setThreads(nextThreads);
+        return nextThreads;
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex history error",
+            `Failed to load Codex history: ${String(error)}`
+          )
+        );
+        return [];
+      } finally {
+        setThreadsLoading(false);
+      }
+    },
+    [appendConversationEntry, threadLocalStore, workspaceRoot]
+  );
+
+  const activateThreadFromRaw = useCallback(
+    (rawThread: unknown) => {
+      const details = extractCodexThreadDetails(rawThread);
+      if (!details) {
+        throw new Error("Codex thread response did not include a readable thread.");
+      }
+
+      setConversationEntries(details.conversationEntries);
+      setSession((current) => ({
+        ...current,
+        activeThreadId: details.id,
+        activeTurnId: null
+      }));
+      setThreadLocalStore((current) => ({
+        ...current,
+        lastOpenedThreadId: details.id,
+        threads: {
+          ...current.threads,
+          [details.id]: {
+            ...(current.threads[details.id] ?? createInitialCodexThreadLocalState()),
+            lastOpenedAt: new Date().toISOString()
+          }
+        }
+      }));
+      setHistoryPanelOpen(false);
+
+      return details;
+    },
+    []
+  );
+
+  const selectThread = useCallback(
+    async (threadId: string, options?: { connectionId?: string | null; focusComposer?: boolean }) => {
+      const connectionId = options?.connectionId ?? sessionRef.current.connectionId;
+      if (!connectionId) {
+        return false;
+      }
+
+      try {
+        const rawThread = await readCodexThread({
+          connectionId,
+          threadId
+        });
+        await resumeCodexThread({
+          connectionId,
+          threadId
+        });
+        activateThreadFromRaw(rawThread);
+        if (options?.focusComposer !== false) {
+          requestComposerFocus();
+        }
+        return true;
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex thread error",
+            `Failed to open Codex thread: ${String(error)}`
+          )
+        );
+        return false;
+      }
+    },
+    [activateThreadFromRaw, appendConversationEntry, requestComposerFocus]
+  );
+
+  const startSession = useCallback(
+    async (reason: "manual" | "send" = "manual") => {
+      if (sessionRef.current.connectionId && sessionRef.current.status === "running") {
+        return sessionRef.current.connectionId;
+      }
+
+      if (connectPromiseRef.current) {
+        return connectPromiseRef.current;
+      }
+
+      const resolvedCommand = commandPath.trim() || "codex";
+
+      setPendingUserInputRequest(null);
+      setSession((current) => ({
+        ...current,
+        connectionId: null,
+        activeTurnId: null,
+        status: "starting",
+        message: "Connecting to Codex app-server...",
+        lastEventMethod: null
+      }));
+
+      if (!isTauriRuntime()) {
+        setSession((current) => ({
+          ...current,
+          status: "error",
+          message: "Tauri runtime unavailable (web dev mode)."
+        }));
+        return null;
+      }
+
+      const promise = (async () => {
+        try {
+          const response = await connectCodexAppServer({
+            workspacePath: workspaceRoot,
+            command: resolvedCommand
+          });
+
+          setSession((current) => ({
+            ...current,
+            connectionId: response.connectionId,
+            activeTurnId: null,
+            status: "running",
+            message: response.message,
+            lastEventMethod: null
+          }));
+
+          const nextThreads = await refreshThreads(response.connectionId);
+          const preferredThreadId =
+            sessionRef.current.activeThreadId
+            ?? (reason === "manual" ? threadLocalStore.lastOpenedThreadId : null);
+
+          if (
+            preferredThreadId
+            && nextThreads.some((thread) => thread.id === preferredThreadId)
+          ) {
+            await selectThread(preferredThreadId, {
+              connectionId: response.connectionId,
+              focusComposer: false
+            });
+          }
+
+          return response.connectionId;
+        } catch (error) {
+          const message = `Failed to connect to Codex app-server: ${String(error)}`;
+          setSession((current) => ({
+            ...current,
+            connectionId: null,
+            status: "error",
+            message
+          }));
+          appendConversationEntry(createCodexEventEntry("Codex connection error", message));
+          return null;
+        } finally {
+          connectPromiseRef.current = null;
+        }
+      })();
+
+      connectPromiseRef.current = promise;
+      return promise;
+    },
+    [appendConversationEntry, commandPath, refreshThreads, selectThread, threadLocalStore.lastOpenedThreadId, workspaceRoot]
+  );
+
+  const stopSession = useCallback(() => {
+    void (async () => {
+      const connectionId = sessionRef.current.connectionId;
+      if (!connectionId) {
+        return;
+      }
+
+      setSession((current) => ({
+        ...current,
+        status: "stopping",
+        message: "Stopping Codex app-server..."
+      }));
+
+      try {
+        const message = await stopCodexAppServer(connectionId);
+        appendConversationEntry(createCodexEventEntry("Codex stopped", message));
+      } catch (error) {
+        const message = `Failed to stop Codex app-server: ${String(error)}`;
+        setSession((current) => ({
+          ...current,
+          status: "error",
+          message
+        }));
+        appendConversationEntry(createCodexEventEntry("Codex stop error", message));
+      }
+    })();
+  }, [appendConversationEntry]);
+
+  const startNewChat = useCallback(() => {
+    void (async () => {
+      requestComposerFocus();
+      setPendingSend(null);
+      setPendingUserInputRequest(null);
+      setHighlightedContextItemId(null);
+
+      const connectionId = await startSession("manual");
+      if (!connectionId) {
+        return;
+      }
+
+      try {
+        const rawThread = await startCodexThread({
+          connectionId,
+          workspacePath: workspaceRoot
+        });
+        activateThreadFromRaw(rawThread);
+        await refreshThreads(connectionId);
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex thread error",
+            `Failed to start a new Codex chat: ${String(error)}`
+          )
+        );
+      }
+    })();
+  }, [activateThreadFromRaw, appendConversationEntry, refreshThreads, requestComposerFocus, startSession, workspaceRoot]);
+
+  const dispatchSend = useCallback(
+    async (send: CodexQueuedSend, connectionId: string, expectedTurnId?: string | null) => {
+      try {
+        await sendCodexTurn({
+          connectionId,
+          prompt: send.prompt,
+          expectedTurnId
+        });
+        return true;
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry("Codex send error", `Failed to send prompt: ${String(error)}`)
+        );
+        return false;
+      }
+    },
+    [appendConversationEntry]
+  );
+
+  const sendDraft = useCallback(() => {
+    void (async () => {
+      const send = createCodexQueuedSend(draft, contextItems);
+      if (!send) {
+        return;
+      }
+
+      setPendingSend(send);
+
+      const connectionId = await startSession("send");
+      if (!connectionId) {
+        setPendingSend(null);
+        return;
+      }
+
+      let activeThreadId = sessionRef.current.activeThreadId;
+
+      if (!activeThreadId) {
+        try {
+          const rawThread = await startCodexThread({
+            connectionId,
+            workspacePath: workspaceRoot
+          });
+          const details = activateThreadFromRaw(rawThread);
+          activeThreadId = details.id;
+          await refreshThreads(connectionId);
+        } catch (error) {
+          appendConversationEntry(
+            createCodexEventEntry(
+              "Codex thread error",
+              `Failed to start a new Codex chat: ${String(error)}`
+            )
+          );
+          setPendingSend(null);
+          return;
+        }
+      }
+
+      const sent = await dispatchSend(send, connectionId, sessionRef.current.activeTurnId);
+      setPendingSend(null);
+      if (!sent || !activeThreadId) {
+        return;
+      }
+
+      const clearedComposer = clearComposerAfterSuccessfulSend();
+      upsertThreadLocalState(activeThreadId, (current) => ({
+        ...current,
+        draft: clearedComposer.draft,
+        contextItems: clearedComposer.contextItems,
+        lastOpenedAt: new Date().toISOString(),
+        lastSubmittedPrompt:
+          send.draft.trim() || send.contextItems[0]?.label || "Context turn"
+      }));
+      setHighlightedContextItemId(null);
+      await refreshThreads(connectionId);
+    })();
+  }, [activateThreadFromRaw, appendConversationEntry, contextItems, dispatchSend, draft, refreshThreads, startSession, upsertThreadLocalState, workspaceRoot]);
+
+  const submitUserInputRequest = useCallback(
+    async (answers: Record<string, string[]>) => {
+      const request = pendingUserInputRequest;
+      const connectionId = sessionRef.current.connectionId;
+      if (!request || !connectionId) {
+        return;
+      }
+
+      try {
+        await respondToCodexServerRequest({
+          connectionId,
+          requestId: request.requestId,
+          result: {
+            answers: Object.fromEntries(
+              Object.entries(answers).map(([questionId, questionAnswers]) => [
+                questionId,
+                { answers: questionAnswers }
+              ])
+            )
+          }
+        });
+        setPendingUserInputRequest(null);
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex request error",
+            `Failed to answer request_user_input: ${String(error)}`
+          )
+        );
+      }
+    },
+    [appendConversationEntry, pendingUserInputRequest]
+  );
+
+  const clearConversation = useCallback(() => {
+    setConversationEntries([]);
+  }, []);
+
+  const addContextItem = useCallback((item: CodexContextItem) => {
+    updateCurrentComposerState((current) => {
+      const result = upsertCodexContextItem(current.contextItems, item);
+      setHighlightedContextItemId(result.highlightedItemId);
+      return {
+        ...current,
+        contextItems: result.items
+      };
+    });
+    requestComposerFocus();
+  }, [requestComposerFocus, updateCurrentComposerState]);
+
+  const removeContextItem = useCallback((itemId: string) => {
+    updateCurrentComposerState((current) => ({
+      ...current,
+      contextItems: current.contextItems.filter((item) => item.id !== itemId)
+    }));
+    setHighlightedContextItemId((current) => (current === itemId ? null : current));
+  }, [updateCurrentComposerState]);
+
+  const clearContextItems = useCallback(() => {
+    updateCurrentComposerState((current) => ({
+      ...current,
+      contextItems: []
+    }));
+    setHighlightedContextItemId(null);
+  }, [updateCurrentComposerState]);
+
+  const renameThread = useCallback((threadId: string, title: string) => {
+    upsertThreadLocalState(threadId, (current) => ({
+      ...current,
+      customTitle: title.trim() ? title.trim() : null
+    }));
+    setThreads((current) =>
+      current.map((thread) =>
+        thread.id === threadId
+          ? {
+              ...thread,
+              name: title.trim() || thread.preview || "New Chat"
+            }
+          : thread
+      )
+    );
+  }, [upsertThreadLocalState]);
+
+  const archiveThreadById = useCallback((threadId: string) => {
+    void (async () => {
+      const connectionId = await startSession("manual");
+      if (!connectionId) {
+        return;
+      }
+
+      try {
+        await archiveCodexThread({
+          connectionId,
+          threadId
+        });
+        setThreads((current) => current.filter((thread) => thread.id !== threadId));
+        setThreadLocalStore((current) => {
+          const nextThreads = { ...current.threads };
+          delete nextThreads[threadId];
+          return {
+            lastOpenedThreadId:
+              current.lastOpenedThreadId === threadId ? null : current.lastOpenedThreadId,
+            threads: nextThreads
+          };
+        });
+
+        if (sessionRef.current.activeThreadId === threadId) {
+          setSession((current) => ({
+            ...current,
+            activeThreadId: null,
+            activeTurnId: null
+          }));
+          setConversationEntries([]);
+          setDetachedComposerState(createDetachedComposerState());
+        }
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex history error",
+            `Failed to archive Codex thread: ${String(error)}`
+          )
+        );
+      }
+    })();
+  }, [appendConversationEntry, startSession]);
+
   useEffect(() => {
-        if (!isTauriRuntime()) {
+    if (!isTauriRuntime()) {
       return;
     }
 
@@ -167,23 +729,16 @@ export function useCodexController({
               setSession((current) => ({
                 ...current,
                 status: "running",
-                message: payload.message,
-                threadId: payload.thread_id ?? current.threadId
+                message: payload.message
               }));
             } else if (payload.phase === "stopped") {
-              if (newChatRequestedRef.current) {
-                newChatRequestedRef.current = false;
-                setSession(createInitialSessionState());
-              } else {
-                setSession((current) => ({
-                  ...current,
-                  connectionId: null,
-                  activeTurnId: null,
-                  status: "stopped",
-                  message: payload.message,
-                  threadId: payload.thread_id ?? current.threadId
-                }));
-              }
+              setSession((current) => ({
+                ...current,
+                connectionId: null,
+                activeTurnId: null,
+                status: "stopped",
+                message: payload.message
+              }));
               setPendingUserInputRequest(null);
             } else {
               setSession((current) => ({
@@ -260,7 +815,7 @@ export function useCodexController({
             if (threadId) {
               setSession((current) => ({
                 ...current,
-                threadId
+                activeThreadId: threadId
               }));
             }
             return;
@@ -287,6 +842,7 @@ export function useCodexController({
                   : current.activeTurnId
             }));
             setPendingUserInputRequest(null);
+            void refreshThreads(sessionRef.current.connectionId);
             return;
           }
 
@@ -371,273 +927,15 @@ export function useCodexController({
         unlisten();
       });
     };
-  }, [appendConversationEntry]);
-
-  const startSession = useCallback(
-    async (reason: "manual" | "send" = "manual") => {
-      if (sessionRef.current.status === "running" || sessionRef.current.status === "starting") {
-        return true;
-      }
-
-      const resolvedCommand = commandPath.trim() || "codex";
-
-      setConversationEntries([]);
-      setPendingUserInputRequest(null);
-      setLastSubmittedPrompt(null);
-      setSession((current) => ({
-        ...current,
-        connectionId: null,
-        activeTurnId: null,
-        status: "starting",
-        message: "Connecting to Codex app-server...",
-        threadId: null,
-        lastEventMethod: null
-      }));
-
-      if (!isTauriRuntime()) {
-        setSession((current) => ({
-          ...current,
-          status: "error",
-          message: "Tauri runtime unavailable (web dev mode)."
-        }));
-        if (reason === "send") {
-          pendingSendRef.current = null;
-          setPendingSend(null);
-        }
-        return false;
-      }
-
-      try {
-        const response = await connectCodexAppServer({
-          workspacePath: workspaceRoot,
-          command: resolvedCommand
-        });
-
-        setSession({
-          connectionId: response.connectionId,
-          threadId: response.threadId,
-          activeTurnId: null,
-          status: "running",
-          message: response.message,
-          lastEventMethod: null
-        });
-
-        return true;
-      } catch (error) {
-        const message = `Failed to connect to Codex app-server: ${String(error)}`;
-        setSession((current) => ({
-          ...current,
-          status: "error",
-          message
-        }));
-        appendConversationEntry(createCodexEventEntry("Codex connection error", message));
-        if (reason === "send") {
-          pendingSendRef.current = null;
-          setPendingSend(null);
-        }
-        return false;
-      }
-    },
-    [appendConversationEntry, commandPath, workspaceRoot]
-  );
-
-  const stopSession = useCallback(() => {
-    void (async () => {
-      const connectionId = sessionRef.current.connectionId;
-      if (!connectionId) {
-        return;
-      }
-
-      setSession((current) => ({
-        ...current,
-        status: "stopping",
-        message: "Stopping Codex app-server..."
-      }));
-
-      try {
-        const message = await stopCodexAppServer(connectionId);
-        appendConversationEntry(createCodexEventEntry("Codex stopped", message));
-      } catch (error) {
-        const message = `Failed to stop Codex app-server: ${String(error)}`;
-        setSession((current) => ({
-          ...current,
-          status: "error",
-          message
-        }));
-        appendConversationEntry(createCodexEventEntry("Codex stop error", message));
-      }
-    })();
-  }, [appendConversationEntry]);
-
-  const clearConversation = useCallback(() => {
-    setConversationEntries([]);
-  }, []);
-
-  const addContextItem = useCallback((item: CodexContextItem) => {
-    setContextItems((current) => {
-      const result = upsertCodexContextItem(current, item);
-      setHighlightedContextItemId(result.highlightedItemId);
-      return result.items;
-    });
-    requestComposerFocus();
-  }, [requestComposerFocus]);
-
-  const removeContextItem = useCallback((itemId: string) => {
-    setContextItems((current) => current.filter((item) => item.id !== itemId));
-    setHighlightedContextItemId((current) => (current === itemId ? null : current));
-  }, []);
-
-  const clearContextItems = useCallback(() => {
-    setContextItems([]);
-    setHighlightedContextItemId(null);
-  }, []);
-
-  const dispatchSend = useCallback(
-    async (
-      send: CodexQueuedSend,
-      overrides?: {
-        connectionId?: string | null;
-        expectedTurnId?: string | null;
-      }
-    ) => {
-      const connectionId = overrides?.connectionId ?? sessionRef.current.connectionId;
-      const expectedTurnId = overrides?.expectedTurnId ?? sessionRef.current.activeTurnId;
-      const isRunning = overrides?.connectionId
-        ? true
-        : sessionRef.current.status === "running";
-
-      if (!connectionId || !isRunning) {
-        return false;
-      }
-
-      try {
-        await sendCodexTurn({
-          connectionId,
-          prompt: send.prompt,
-          expectedTurnId
-        });
-        setLastSubmittedPrompt(
-          send.draft.trim() || send.contextItems[0]?.label || "Context turn"
-        );
-        const nextComposerState = clearComposerAfterSuccessfulSend();
-        setDraft(nextComposerState.draft);
-        setContextItems(nextComposerState.contextItems);
-        setHighlightedContextItemId(null);
-        return true;
-      } catch (error) {
-        appendConversationEntry(
-          createCodexEventEntry("Codex send error", `Failed to send prompt: ${String(error)}`)
-        );
-        return false;
-      }
-    },
-    [appendConversationEntry]
-  );
-
-  const sendDraft = useCallback(() => {
-    const plan = planCodexSend(sessionRef.current.status, draft, contextItems);
-    if (plan.kind === "noop") {
-      return;
-    }
-
-    if (plan.kind === "dispatch") {
-      void dispatchSend(plan.send);
-      return;
-    }
-
-    setPendingSend(plan.send);
-    pendingSendRef.current = plan.send;
-    void startSession("send");
-  }, [contextItems, dispatchSend, draft, startSession]);
-
-  useEffect(() => {
-    if (session.status !== "running" || !session.connectionId || !pendingSendRef.current) {
-      return;
-    }
-
-    const queuedSend = pendingSendRef.current;
-    pendingSendRef.current = null;
-    setPendingSend(null);
-    void dispatchSend(queuedSend, {
-      connectionId: session.connectionId,
-      expectedTurnId: session.activeTurnId
-    });
-  }, [dispatchSend, session.activeTurnId, session.connectionId, session.status]);
-
-  const submitUserInputRequest = useCallback(
-    async (answers: Record<string, string[]>) => {
-      const request = pendingUserInputRequest;
-      const connectionId = sessionRef.current.connectionId;
-      if (!request || !connectionId) {
-        return;
-      }
-
-      try {
-        await respondToCodexServerRequest({
-          connectionId,
-          requestId: request.requestId,
-          result: {
-            answers: Object.fromEntries(
-              Object.entries(answers).map(([questionId, questionAnswers]) => [
-                questionId,
-                { answers: questionAnswers }
-              ])
-            )
-          }
-        });
-        setPendingUserInputRequest(null);
-      } catch (error) {
-        appendConversationEntry(
-          createCodexEventEntry(
-            "Codex request error",
-            `Failed to answer request_user_input: ${String(error)}`
-          )
-        );
-      }
-    },
-    [appendConversationEntry, pendingUserInputRequest]
-  );
-
-  const startNewChat = useCallback(() => {
-    const connectionId = sessionRef.current.connectionId;
-
-    setConversationEntries([]);
-    setDraft("");
-    setContextItems([]);
-    setHighlightedContextItemId(null);
-    pendingSendRef.current = null;
-    setPendingSend(null);
-    setPendingUserInputRequest(null);
-    setLastSubmittedPrompt(null);
-    requestComposerFocus();
-
-    if (!connectionId) {
-      newChatRequestedRef.current = false;
-      setSession(createInitialSessionState());
-      return;
-    }
-
-    newChatRequestedRef.current = true;
-    setSession((current) => ({
-      ...current,
-      status: "stopping",
-      message: "Starting a new chat..."
-    }));
-
-    void stopCodexAppServer(connectionId).catch((error) => {
-      newChatRequestedRef.current = false;
-      setSession({
-        ...createInitialSessionState(),
-        status: "error",
-        message: `Failed to reset Codex chat: ${String(error)}`
-      });
-    });
-  }, [requestComposerFocus]);
-
-  const canSend = Boolean(buildCodexPrompt(draft, contextItems));
+  }, [appendConversationEntry, refreshThreads]);
 
   return {
     session,
+    threads,
+    threadsLoading,
+    historyPanelOpen,
+    setHistoryPanelOpen,
+    toggleHistoryPanel: () => setHistoryPanelOpen((current) => !current),
     conversationEntries,
     draft,
     setDraft,
@@ -657,6 +955,10 @@ export function useCodexController({
     startSession,
     stopSession,
     sendDraft,
-    submitUserInputRequest
+    submitUserInputRequest,
+    refreshThreads,
+    selectThread,
+    renameThread,
+    archiveThread: archiveThreadById
   };
 }

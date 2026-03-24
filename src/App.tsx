@@ -1795,7 +1795,7 @@ function App() {
           rows: [
             { label: "Workspace", value: workspace.rootPath },
             { label: "Connection", value: codexController.session.connectionId ?? "None" },
-            { label: "Thread", value: codexController.session.threadId ?? "None" },
+            { label: "Thread", value: codexController.session.activeThreadId ?? "None" },
             { label: "Status", value: codexController.session.status },
             {
               label: "Active turn",
@@ -1909,7 +1909,7 @@ function App() {
           "$ codex app-server",
           "Global dock and Codex page now share one live app-server thread controller.",
           `Session status: ${codexController.session.status}`,
-          `Thread: ${codexController.session.threadId ?? "Not started"}`
+          `Thread: ${codexController.session.activeThreadId ?? "Not started"}`
         ]
       }
     ];
@@ -2227,6 +2227,9 @@ function App() {
         <CodexScreen
           workspace={workspace}
           session={codexController.session}
+          threads={codexController.threads}
+          threadsLoading={codexController.threadsLoading}
+          historyPanelOpen={codexController.historyPanelOpen}
           draft={codexController.draft}
           contextItems={codexController.contextItems}
           conversationEntries={codexController.conversationEntries}
@@ -2247,6 +2250,10 @@ function App() {
           onRemoveContextItem={codexController.removeContextItem}
           onSubmitUserInputRequest={codexController.submitUserInputRequest}
           onNewChat={codexController.startNewChat}
+          onToggleHistoryPanel={codexController.toggleHistoryPanel}
+          onSelectThread={codexController.selectThread}
+          onRenameThread={codexController.renameThread}
+          onArchiveThread={codexController.archiveThread}
         />
       );
     }
@@ -2415,6 +2422,9 @@ function App() {
               variant="dock"
               workspacePath={workspace.rootPath}
               session={codexController.session}
+              threads={codexController.threads}
+              threadsLoading={codexController.threadsLoading}
+              historyPanelOpen={codexController.historyPanelOpen}
               draft={codexController.draft}
               contextItems={codexController.contextItems}
               conversationEntries={codexController.conversationEntries}
@@ -2435,7 +2445,10 @@ function App() {
               onRemoveContextItem={codexController.removeContextItem}
               onSubmitUserInputRequest={codexController.submitUserInputRequest}
               onNewChat={codexController.startNewChat}
-              onOpenPage={() => openSection("codex")}
+              onToggleHistoryPanel={codexController.toggleHistoryPanel}
+              onSelectThread={codexController.selectThread}
+              onRenameThread={codexController.renameThread}
+              onArchiveThread={codexController.archiveThread}
             />
           }
           infoContent={

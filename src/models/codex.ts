@@ -8,7 +8,7 @@ export type CodexSessionStatus =
 
 export interface CodexSessionState {
   connectionId: string | null;
-  threadId: string | null;
+  activeThreadId: string | null;
   activeTurnId: string | null;
   status: CodexSessionStatus;
   message: string;
@@ -44,6 +44,33 @@ export interface CodexConversationEntry {
   phase?: string | null;
 }
 
+export interface CodexThreadSummary {
+  id: string;
+  name: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  status: string | null;
+  preview: string | null;
+  archived: boolean;
+}
+
+export interface CodexThreadDetails extends CodexThreadSummary {
+  conversationEntries: CodexConversationEntry[];
+}
+
+export interface CodexThreadLocalState {
+  customTitle: string | null;
+  draft: string;
+  contextItems: CodexContextItem[];
+  lastOpenedAt: string | null;
+  lastSubmittedPrompt: string | null;
+}
+
+export interface CodexThreadLocalStore {
+  lastOpenedThreadId: string | null;
+  threads: Record<string, CodexThreadLocalState>;
+}
+
 export type CodexAppLifecyclePhase = "connected" | "stopped" | "error";
 
 export type CodexAppEventPayload =
@@ -75,7 +102,6 @@ export type CodexAppEventPayload =
 
 export interface CodexAppConnectResponse {
   connectionId: string;
-  threadId: string;
   message: string;
 }
 

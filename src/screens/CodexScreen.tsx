@@ -3,7 +3,8 @@ import { CodexWorkbench } from "../components/shell/CodexWorkbench";
 import type {
   CodexContextItem,
   CodexConversationEntry,
-  CodexSessionState
+  CodexSessionState,
+  CodexThreadSummary
 } from "../models/codex.js";
 import type { Workspace } from "../models/workspace";
 
@@ -25,6 +26,9 @@ interface PendingUserInputRequest {
 interface CodexScreenProps {
   workspace: Workspace;
   session: CodexSessionState;
+  threads: CodexThreadSummary[];
+  threadsLoading: boolean;
+  historyPanelOpen: boolean;
   draft: string;
   contextItems: CodexContextItem[];
   conversationEntries: CodexConversationEntry[];
@@ -43,11 +47,18 @@ interface CodexScreenProps {
   onRemoveContextItem: (itemId: string) => void;
   onSubmitUserInputRequest: (answers: Record<string, string[]>) => void;
   onNewChat: () => void;
+  onToggleHistoryPanel: () => void;
+  onSelectThread: (threadId: string) => void;
+  onRenameThread: (threadId: string, title: string) => void;
+  onArchiveThread: (threadId: string) => void;
 }
 
 export function CodexScreen({
   workspace,
   session,
+  threads,
+  threadsLoading,
+  historyPanelOpen,
   draft,
   contextItems,
   conversationEntries,
@@ -65,7 +76,11 @@ export function CodexScreen({
   onClearContextItems,
   onRemoveContextItem,
   onSubmitUserInputRequest,
-  onNewChat
+  onNewChat,
+  onToggleHistoryPanel,
+  onSelectThread,
+  onRenameThread,
+  onArchiveThread
 }: CodexScreenProps) {
   return (
     <section className="workspace-screen codex-screen">
@@ -79,6 +94,9 @@ export function CodexScreen({
         variant="page"
         workspacePath={workspace.rootPath}
         session={session}
+        threads={threads}
+        threadsLoading={threadsLoading}
+        historyPanelOpen={historyPanelOpen}
         draft={draft}
         contextItems={contextItems}
         conversationEntries={conversationEntries}
@@ -97,6 +115,10 @@ export function CodexScreen({
         onRemoveContextItem={onRemoveContextItem}
         onSubmitUserInputRequest={onSubmitUserInputRequest}
         onNewChat={onNewChat}
+        onToggleHistoryPanel={onToggleHistoryPanel}
+        onSelectThread={onSelectThread}
+        onRenameThread={onRenameThread}
+        onArchiveThread={onArchiveThread}
       />
     </section>
   );

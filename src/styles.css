@@ -1415,6 +1415,7 @@ table {
 
 .right-dock-content {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -1581,6 +1582,7 @@ table {
 
 .codex-workbench-dock {
   padding: 0;
+  min-width: 0;
   min-height: 100%;
 }
 
@@ -1589,6 +1591,7 @@ table {
 }
 
 .codex-workbench-cursor {
+  min-width: 0;
   background: var(--shell-sidebar-bg);
   color: var(--text-primary);
 }
@@ -1666,6 +1669,7 @@ table {
   top: 0;
   z-index: 4;
   display: grid;
+  min-width: 0;
   gap: 4px;
   padding: 4px 14px;
   background: linear-gradient(
@@ -1680,11 +1684,13 @@ table {
 .codex-cursor-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  min-width: 0;
   gap: 10px;
 }
 
 .codex-cursor-toolbar-title {
+  flex: 1 1 0;
+  width: 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1696,6 +1702,8 @@ table {
 
 .codex-cursor-toolbar-actions {
   display: flex;
+  flex: 0 0 auto;
+  margin-left: auto;
   align-items: center;
   gap: 8px;
 }
@@ -1733,7 +1741,11 @@ table {
 }
 
 .codex-cursor-question-pill {
+  display: block;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1805,6 +1817,8 @@ table {
 .codex-cursor-feed-shell {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
 }
 
 .codex-cursor-sticky-bottom {
@@ -1826,6 +1840,133 @@ table {
   padding: 0 var(--space-1);
   color: var(--text-muted);
   font-size: var(--font-size-xs);
+}
+
+.codex-page-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
+}
+
+.codex-page-history-column,
+.codex-page-main-column {
+  min-width: 0;
+  min-height: 0;
+}
+
+.codex-page-main-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.codex-history-slideout {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  padding: 10px 14px 0;
+  background: color-mix(in srgb, var(--shell-sidebar-bg) 94%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.codex-history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  height: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--panel-bg-secondary);
+  padding: var(--space-3);
+}
+
+.codex-history-panel-dock {
+  box-shadow: 0 10px 30px color-mix(in srgb, #000 14%, transparent);
+}
+
+.codex-history-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.codex-history-panel-header p {
+  margin-top: 2px;
+  font-size: var(--font-size-xs);
+}
+
+.codex-history-list {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.codex-history-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 90%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-bg-tertiary) 72%, transparent);
+}
+
+.codex-history-item.active {
+  border-color: color-mix(in srgb, var(--accent-color) 35%, var(--border-color));
+  background: color-mix(in srgb, var(--accent-color) 6%, var(--panel-bg-secondary));
+}
+
+.codex-history-item-select {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.codex-history-item-select strong,
+.codex-history-item-preview,
+.codex-history-item-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-history-item-select strong {
+  font-size: var(--font-size-sm);
+}
+
+.codex-history-item-preview {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.codex-history-item-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.codex-history-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.codex-history-empty {
+  margin: auto 0;
 }
 
 .codex-context-chip-list {
@@ -2106,6 +2247,12 @@ table {
 
 .tone-success {
   color: var(--success-color);
+}
+
+@media (max-width: 1100px) {
+  .codex-page-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .tone-danger {

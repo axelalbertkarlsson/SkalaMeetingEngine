@@ -192,8 +192,40 @@ pub struct CodexAppConnectRequest {
 #[serde(rename_all = "snake_case")]
 pub struct CodexAppConnectResponse {
     pub connection_id: String,
-    pub thread_id: String,
     pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppListThreadsRequest {
+    pub connection_id: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppListThreadsResponse {
+    pub threads: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppThreadRequest {
+    pub connection_id: String,
+    pub thread_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppThreadResponse {
+    pub thread: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppStartThreadRequest {
+    pub connection_id: String,
+    pub workspace_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,6 +494,16 @@ fn extract_turn_id_from_value(value: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn build_thread_start_params(workspace_path: &str) -> Value {
+    json!({
+        "approvalPolicy": "never",
+        "cwd": workspace_path,
+        "personality": "pragmatic",
+        "sandbox": "workspace-write",
+        "serviceName": "skala_meeting_engine",
+    })
+}
+
 fn handle_server_message(
     app: &AppHandle,
     state: &CodexAppServerState,
@@ -707,36 +749,150 @@ pub fn codex_app_connect(
     )?;
     connection.send_notification("initialized", json!({}))?;
 
-    let thread_start_result = connection.send_request(
-        "thread/start",
-        json!({
-            "approvalPolicy": "never",
-            "cwd": request.workspace_path,
-            "personality": "pragmatic",
-            "sandbox": "workspace-write",
-            "serviceName": "skala_meeting_engine",
-        }),
-    )?;
-
-    let thread_id = extract_thread_id_from_value(&thread_start_result)
-        .ok_or_else(|| "Codex app-server thread/start response did not include a thread id.".to_string())?;
-
-    connection.set_active_thread_id(Some(thread_id.clone()));
-
     emit_codex_app_event(
         &app,
         &CodexAppEventPayload::Lifecycle {
             connection_id: connection_id.clone(),
             phase: CodexAppLifecyclePhase::Connected,
             message: "Connected to Codex app-server.".to_string(),
-            thread_id: Some(thread_id.clone()),
+            thread_id: None,
         },
     );
 
     Ok(CodexAppConnectResponse {
         connection_id,
-        thread_id,
         message: "Connected to Codex app-server.".to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn codex_app_list_threads(
+    state: State<CodexAppServerState>,
+    request: CodexAppListThreadsRequest,
+) -> Result<CodexAppListThreadsResponse, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    let result = connection.send_request(
+        "thread/list",
+        json!({
+            "cwd": request.cwd,
+        }),
+    )?;
+
+    let threads = result
+        .get("threads")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(CodexAppListThreadsResponse { threads })
+}
+
+#[tauri::command]
+pub fn codex_app_read_thread(
+    state: State<CodexAppServerState>,
+    request: CodexAppThreadRequest,
+) -> Result<CodexAppThreadResponse, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    let result = connection.send_request(
+        "thread/read",
+        json!({
+            "id": request.thread_id,
+            "includeTurns": true,
+        }),
+    )?;
+
+    let thread = result
+        .get("thread")
+        .cloned()
+        .unwrap_or(result);
+
+    Ok(CodexAppThreadResponse { thread })
+}
+
+#[tauri::command]
+pub fn codex_app_resume_thread(
+    state: State<CodexAppServerState>,
+    request: CodexAppThreadRequest,
+) -> Result<CodexAppThreadResponse, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    let result = connection.send_request(
+        "thread/resume",
+        json!({
+            "id": request.thread_id,
+        }),
+    )?;
+
+    let thread = result
+        .get("thread")
+        .cloned()
+        .unwrap_or(result);
+    let thread_id = extract_thread_id_from_value(&json!({ "thread": thread.clone() }))
+        .or_else(|| thread.get("id").and_then(Value::as_str).map(ToString::to_string))
+        .ok_or_else(|| "Codex app-server thread/resume response did not include a thread id.".to_string())?;
+    connection.set_active_thread_id(Some(thread_id));
+
+    Ok(CodexAppThreadResponse { thread })
+}
+
+#[tauri::command]
+pub fn codex_app_start_thread(
+    state: State<CodexAppServerState>,
+    request: CodexAppStartThreadRequest,
+) -> Result<CodexAppThreadResponse, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    let result = connection.send_request(
+        "thread/start",
+        build_thread_start_params(&request.workspace_path),
+    )?;
+
+    let thread = result
+        .get("thread")
+        .cloned()
+        .unwrap_or(result);
+    let thread_id = extract_thread_id_from_value(&json!({ "thread": thread.clone() }))
+        .or_else(|| thread.get("id").and_then(Value::as_str).map(ToString::to_string))
+        .ok_or_else(|| "Codex app-server thread/start response did not include a thread id.".to_string())?;
+    connection.set_active_thread_id(Some(thread_id));
+
+    Ok(CodexAppThreadResponse { thread })
+}
+
+#[tauri::command]
+pub fn codex_app_archive_thread(
+    state: State<CodexAppServerState>,
+    request: CodexAppThreadRequest,
+) -> Result<OperationAck, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    connection.send_request(
+        "thread/archive",
+        json!({
+            "id": request.thread_id,
+        }),
+    )?;
+
+    if connection.active_thread_id().as_deref() == Some(request.thread_id.as_str()) {
+        connection.set_active_thread_id(None);
+        connection.set_active_turn_id(None);
+    }
+
+    Ok(OperationAck {
+        ok: true,
+        message: "Archived Codex thread.".to_string(),
     })
 }
 

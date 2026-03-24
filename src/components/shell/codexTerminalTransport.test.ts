@@ -22,6 +22,14 @@ import {
   planCodexSend,
   upsertCodexContextItem
 } from "../../lib/codexContext.js";
+import {
+  createInitialCodexThreadLocalState,
+  extractCodexThreadDetails,
+  getCodexThreadLocalStoreKey,
+  resolveCodexThreadTitle,
+  sanitizeCodexThreadLocalStore,
+  sortCodexThreads
+} from "../../lib/codexThreads.js";
 import type { CodexContextItem } from "../../models/codex.js";
 
 export interface TerminalHelperTestCase {
@@ -390,6 +398,126 @@ export const tests: TerminalHelperTestCase[] = [
 
       assert(updated[0]?.text === "Partial answer", "expected the matching entry to receive the delta");
       assert(updated[1]?.text === "Static", "expected non-matching entries to remain unchanged");
+    }
+  },
+  {
+    name: "resolveCodexThreadTitle prefers local rename over server title and preview",
+    run() {
+      const title = resolveCodexThreadTitle(
+        {
+          id: "thread-1",
+          name: "Server title",
+          preview: "Prompt preview",
+          createdAt: null,
+          updatedAt: null,
+          status: "idle",
+          archived: false
+        },
+        {
+          ...createInitialCodexThreadLocalState(),
+          customTitle: "Local title"
+        }
+      );
+
+      assert(title === "Local title", `expected local title override, received ${JSON.stringify(title)}`);
+    }
+  },
+  {
+    name: "sanitizeCodexThreadLocalStore keeps valid thread drafts and drops malformed values",
+    run() {
+      const store = sanitizeCodexThreadLocalStore({
+        lastOpenedThreadId: "thread-1",
+        threads: {
+          "thread-1": {
+            customTitle: "Renamed",
+            draft: "Continue this",
+            contextItems: [asContextItem("C:\\notes\\one.md", "One")],
+            lastOpenedAt: "2026-03-24T08:00:00.000Z",
+            lastSubmittedPrompt: "Previous prompt"
+          },
+          "thread-2": "bad"
+        }
+      });
+
+      assert(store.lastOpenedThreadId === "thread-1", "expected last opened thread id to survive sanitization");
+      assert(store.threads["thread-1"]?.draft === "Continue this", "expected valid thread draft to survive");
+      assert(store.threads["thread-1"]?.contextItems.length === 1, "expected valid context items to survive");
+      assert(store.threads["thread-2"]?.draft === "", "expected malformed thread state to reset");
+      assert(
+        getCodexThreadLocalStoreKey("C:\\workspace") === "codex.threadHistory.C:\\workspace",
+        "expected workspace-scoped local-storage key"
+      );
+    }
+  },
+  {
+    name: "extractCodexThreadDetails hydrates full conversation entries from thread turns",
+    run() {
+      const details = extractCodexThreadDetails({
+        id: "thread-1",
+        name: null,
+        updatedAt: "2026-03-24T09:30:00.000Z",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "msg-user-1",
+                type: "userMessage",
+                role: "user",
+                content: [{ type: "text", text: "Summarize this transcript." }]
+              },
+              {
+                id: "msg-agent-1",
+                type: "agentMessage",
+                text: "Here is the summary."
+              }
+            ]
+          }
+        ]
+      });
+
+      assert(details?.id === "thread-1", "expected thread details to be created");
+      assert(details?.preview === "Summarize this transcript.", "expected preview from first real user message");
+      assert(details?.conversationEntries.length === 2, "expected both user and agent entries to hydrate");
+      assert(details?.conversationEntries[0]?.kind === "user_message", "expected first hydrated entry to be the user message");
+    }
+  },
+  {
+    name: "sortCodexThreads prefers recently opened local chats before updated timestamps",
+    run() {
+      const sorted = sortCodexThreads(
+        [
+          {
+            id: "thread-older",
+            name: "Older",
+            preview: null,
+            createdAt: null,
+            updatedAt: "2026-03-24T09:00:00.000Z",
+            status: "idle",
+            archived: false
+          },
+          {
+            id: "thread-recent",
+            name: "Recent",
+            preview: null,
+            createdAt: null,
+            updatedAt: "2026-03-24T10:00:00.000Z",
+            status: "idle",
+            archived: false
+          }
+        ],
+        {
+          lastOpenedThreadId: "thread-older",
+          threads: {
+            "thread-older": {
+              ...createInitialCodexThreadLocalState(),
+              lastOpenedAt: "2026-03-24T11:00:00.000Z"
+            }
+          }
+        }
+      );
+
+      assert(sorted[0]?.id === "thread-older", "expected locally reopened thread to sort first");
     }
   }
 ];
