@@ -13,6 +13,16 @@ import {
   shouldForceTerminalResize,
   type TerminalQueuedWrite
 } from "./codexTerminalTransport.js";
+import {
+  appendTextToConversationEntry,
+  buildCodexPrompt,
+  clearComposerAfterSuccessfulSend,
+  createCodexConversationEntryFromItem,
+  extractTextFromUserMessageContent,
+  planCodexSend,
+  upsertCodexContextItem
+} from "../../lib/codexContext.js";
+import type { CodexContextItem } from "../../models/codex.js";
 
 export interface TerminalHelperTestCase {
   name: string;
@@ -46,6 +56,16 @@ function asPtyWrite(seq: number, text: string): TerminalQueuedWrite {
     kind: "pty",
     seq,
     data: bytes
+  };
+}
+
+function asContextItem(path: string, label = "Context file"): CodexContextItem {
+  return {
+    id: `ctx-${label.toLowerCase().replace(/\s+/g, "-")}`,
+    kind: "document_note",
+    label,
+    path,
+    sourceId: label
   };
 }
 
@@ -240,6 +260,136 @@ export const tests: TerminalHelperTestCase[] = [
         }) === 0,
         "expected compact PTY writes to remain immediate"
       );
+    }
+  },
+  {
+    name: "upsertCodexContextItem deduplicates by absolute path and highlights the existing chip",
+    run() {
+      const first = asContextItem("C:\\notes\\sync.md", "Sync");
+      const duplicate = asContextItem("C:\\notes\\sync.md", "Another label");
+      const result = upsertCodexContextItem([first], duplicate);
+
+      assert(result.items.length === 1, `expected one chip after dedupe, received ${result.items.length}`);
+      assert(result.highlightedItemId === first.id, `expected ${first.id} to be highlighted`);
+      assert(!result.added, "expected duplicate add to avoid appending a second chip");
+    }
+  },
+  {
+    name: "buildCodexPrompt serializes explicit file context before the user draft",
+    run() {
+      const prompt = buildCodexPrompt("Summarize the meeting.", [
+        asContextItem("C:\\meeting\\cleaned.md", "Cleaned transcript"),
+        asContextItem("C:\\notes\\plan.md", "Planning note")
+      ]);
+
+      assert(
+        prompt === "Use these files as context:\n- C:\\meeting\\cleaned.md\n- C:\\notes\\plan.md\n\nSummarize the meeting.",
+        `unexpected prompt serialization: ${JSON.stringify(prompt)}`
+      );
+
+      assert(
+        buildCodexPrompt("Just draft", []) === "Just draft",
+        "expected plain draft to pass through when no chips are staged"
+      );
+    }
+  },
+  {
+    name: "planCodexSend queues the prompt when the first send must start a session",
+    run() {
+      const plan = planCodexSend("idle", "Review this note.", [
+        asContextItem("C:\\notes\\review.md", "Review note")
+      ]);
+
+      assert(plan.kind === "start_and_queue", `expected queued send plan, received ${plan.kind}`);
+      if (plan.kind !== "start_and_queue") {
+        throw new Error("expected start_and_queue plan");
+      }
+
+      assert(
+        plan.send.prompt.includes("Use these files as context:"),
+        "expected queued send prompt to include explicit file context"
+      );
+    }
+  },
+  {
+    name: "clearComposerAfterSuccessfulSend resets the draft and one-turn context chips",
+    run() {
+      const nextState = clearComposerAfterSuccessfulSend();
+      assert(nextState.draft === "", "expected draft to clear after a successful send");
+      assert(nextState.contextItems.length === 0, "expected one-turn context chips to clear after send");
+    }
+  },
+  {
+    name: "extractTextFromUserMessageContent keeps text payloads and mention paths readable",
+    run() {
+      const text = extractTextFromUserMessageContent([
+        { type: "text", text: "Use the transcript." },
+        { type: "mention", name: "transcript.md", path: "C:\\notes\\transcript.md" }
+      ]);
+
+      assert(
+        text === "Use the transcript.\nC:\\notes\\transcript.md",
+        `unexpected extracted user message text: ${JSON.stringify(text)}`
+      );
+    }
+  },
+  {
+    name: "createCodexConversationEntryFromItem maps agent and command items into feed entries",
+    run() {
+      const agentEntry = createCodexConversationEntryFromItem(
+        {
+          id: "agent-1",
+          type: "agentMessage",
+          text: "I reviewed the transcript.",
+          phase: "final_answer"
+        },
+        "turn-1"
+      );
+      const commandEntry = createCodexConversationEntryFromItem(
+        {
+          id: "cmd-1",
+          type: "commandExecution",
+          command: "rg TODO",
+          cwd: "C:\\workspace",
+          status: "completed",
+          aggregatedOutput: "TODO: fix transcript"
+        },
+        "turn-1"
+      );
+
+      assert(agentEntry?.kind === "agent_message", "expected an agent message entry");
+      assert(agentEntry?.text === "I reviewed the transcript.", "expected agent text to carry through");
+      assert(commandEntry?.kind === "command_execution", "expected a command execution entry");
+      assert(commandEntry?.meta === "C:\\workspace", "expected the command cwd to be preserved");
+    }
+  },
+  {
+    name: "appendTextToConversationEntry appends deltas onto the matching item only",
+    run() {
+      const updated = appendTextToConversationEntry(
+        [
+          {
+            id: "conversation-agent-1",
+            itemId: "agent-1",
+            kind: "agent_message",
+            title: "Codex",
+            text: "Partial",
+            turnId: "turn-1"
+          },
+          {
+            id: "conversation-event-1",
+            itemId: "event-1",
+            kind: "event",
+            title: "Event",
+            text: "Static"
+          }
+        ],
+        "agent-1",
+        " answer"
+      );
+
+      assert(updated[0]?.text === "Partial answer", "expected the matching entry to receive the delta");
+      assert(updated[1]?.text === "Static", "expected non-matching entries to remain unchanged");
     }
   }
 ];

@@ -9,7 +9,6 @@ interface SettingsScreenProps {
   workspace: Workspace;
   selectedCategory: string;
   codexCommandPath: string;
-  codexDisableAltScreen: boolean;
   codexCaptureDebugBundle: boolean;
   documentsOpenInNewTab: boolean;
   documentsBasePath: string;
@@ -17,7 +16,6 @@ interface SettingsScreenProps {
   transcriptionSettings: TranscriptionSettings;
   transcriptionStatusMessage: string | null;
   onCodexCommandPathChange: (value: string) => void;
-  onCodexDisableAltScreenChange: (value: boolean) => void;
   onCodexCaptureDebugBundleChange: (value: boolean) => void;
   onDocumentsOpenInNewTabChange: (value: boolean) => void;
   onDocumentsBasePathChange: (value: string) => void;
@@ -37,7 +35,6 @@ export function SettingsScreen({
   workspace,
   selectedCategory,
   codexCommandPath,
-  codexDisableAltScreen,
   codexCaptureDebugBundle,
   documentsOpenInNewTab,
   documentsBasePath,
@@ -45,7 +42,6 @@ export function SettingsScreen({
   transcriptionSettings,
   transcriptionStatusMessage,
   onCodexCommandPathChange,
-  onCodexDisableAltScreenChange,
   onCodexCaptureDebugBundleChange,
   onDocumentsOpenInNewTabChange,
   onDocumentsBasePathChange,
@@ -129,13 +125,13 @@ export function SettingsScreen({
     },
     "settings-codex": {
       title: "Codex",
-      description: "Configure the executable, terminal mode, and debug capture used by the embedded Codex session.",
+      description: "Configure the executable used by the shared Codex dock and full-page app-server session.",
       rows: [
-        { label: "Execution mode", value: "Local subprocess" },
+        { label: "Execution mode", value: "Local Codex CLI app-server" },
         { label: "Workspace binding", value: workspace.rootPath },
         { label: "Configured command", value: codexCommandPath || "codex" },
-        { label: "Terminal mode", value: codexDisableAltScreen ? "Compact fallback (--no-alt-screen)" : "Full-screen primary" },
-        { label: "Debug capture", value: codexCaptureDebugBundle ? "Enabled" : "Disabled" }
+        { label: "Transport", value: "JSON-RPC over stdio (JSONL)" },
+        { label: "Diagnostics", value: codexCaptureDebugBundle ? "Reserved flag enabled" : "Reserved flag disabled" }
       ]
     }
   };
@@ -294,19 +290,10 @@ export function SettingsScreen({
             ))}
           </div>
 
-          <div className="settings-toggle-row">
-            <label className="settings-toggle-label">
-              <input
-                type="checkbox"
-                checked={codexDisableAltScreen}
-                onChange={(event) => onCodexDisableAltScreenChange(event.target.checked)}
-              />
-              Use compact fallback mode (<code>--no-alt-screen</code>)
-            </label>
-            <p className="muted settings-help-copy">
-              Full-screen Codex UI is the primary embedded mode. Turn this on only when you want the manual compact fallback for redraw troubleshooting.
-            </p>
-          </div>
+          <p className="muted settings-help-copy">
+            The shared Codex dock and page now talk to <code>codex app-server</code> over stdio.
+            The dock stages file paths as structured context, while the page reuses the same live thread.
+          </p>
 
           <div className="settings-toggle-row">
             <label className="settings-toggle-label">
@@ -315,11 +302,11 @@ export function SettingsScreen({
                 checked={codexCaptureDebugBundle}
                 onChange={(event) => onCodexCaptureDebugBundleChange(event.target.checked)}
               />
-              Capture a debug bundle for the next Codex session
+              Keep transport diagnostics flag enabled
             </label>
             <p className="muted settings-help-copy">
-              This writes a session bundle under <code>.skala/codex-captures</code> with raw PTY output,
-              frontend render events, resize timing, and terminal input. Use it only while reproducing the bug.
+              The old PTY capture bundle is no longer used in app-server mode. This toggle is kept only as a
+              placeholder for future structured transport diagnostics.
             </p>
           </div>
         </article>

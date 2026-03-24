@@ -2,11 +2,12 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { MilkdownEditor } from "../components/shell/MilkdownEditor";
-import { PanelLeftIcon, PanelRightIcon } from "../components/shell/icons";
 import { useLocalStorageState } from "../hooks/useLocalStorageState";
 import {
   isDocumentsFilePersistenceAvailable,
   readDocumentNoteFile,
+  readDocumentMarkdownFromLocalStorage,
+  writeDocumentMarkdownToLocalStorage,
   writeDocumentNoteFile
 } from "../services/documentsFileStore";
 
@@ -18,27 +19,6 @@ interface DocumentsScreenProps {
   noteId?: string;
   documentsBasePath: string;
   editorFont: DocumentsEditorFont;
-}
-
-function getDocumentMarkdownStorageKey(noteId?: string) {
-  return noteId ? `documents.markdown.${noteId}` : "documents.markdown.unbound";
-}
-
-function readDocumentMarkdownFromLocalStorage(noteId: string) {
-  const raw = window.localStorage.getItem(getDocumentMarkdownStorageKey(noteId));
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(raw) as string;
-  } catch {
-    return null;
-  }
-}
-
-function writeDocumentMarkdownToLocalStorage(noteId: string, markdown: string) {
-  window.localStorage.setItem(getDocumentMarkdownStorageKey(noteId), JSON.stringify(markdown));
 }
 
 export function DocumentsScreen({ theme, noteId, documentsBasePath, editorFont }: DocumentsScreenProps) {
@@ -131,6 +111,14 @@ export function DocumentsScreen({ theme, noteId, documentsBasePath, editorFont }
     };
   }, [noteId, markdownReady, documentsBasePath]);
 
+  const handleMarkdownChange = (nextMarkdown: string) => {
+    setMarkdown(nextMarkdown);
+
+    if (noteId) {
+      writeDocumentMarkdownToLocalStorage(noteId, nextMarkdown);
+    }
+  };
+
   const togglePreviewButton = (
     <button
       type="button"
@@ -175,7 +163,7 @@ export function DocumentsScreen({ theme, noteId, documentsBasePath, editorFont }
             <MilkdownEditor
               key={`${noteId ?? "documents"}:${documentsBasePath || "default"}`}
               value={markdown}
-              onChange={setMarkdown}
+              onChange={handleMarkdownChange}
               className="documents-editor-root"
             />
           ) : (

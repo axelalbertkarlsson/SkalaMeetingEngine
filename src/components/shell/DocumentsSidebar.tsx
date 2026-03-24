@@ -4,6 +4,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CollapseAllIcon,
+  CodeIcon,
   DuplicateIcon,
   ExpandAllIcon,
   NewFolderIcon,
@@ -24,6 +25,7 @@ export interface DocumentTreeItem {
 }
 
 type DocumentContextAction =
+  | "add-to-codex"
   | "open-in-new-tab"
   | "new-note"
   | "new-subfolder"
@@ -41,6 +43,7 @@ interface DocumentsSidebarProps {
   onCreateNote: (parentFolderId?: string) => DocumentTreeItem;
   onCreateFolder: (parentFolderId?: string) => DocumentTreeItem;
   onOpenInNewTab: (itemId: string) => void;
+  onAddToCodex: (itemId: string) => void;
   onDuplicateItem: (itemId: string) => void;
   onCopyPath: (itemId: string) => void;
   onRenameItem: (itemId: string) => void;
@@ -138,6 +141,7 @@ function getContextActions(item: DocumentTreeItem): Array<{ id: DocumentContextA
   }
 
   return [
+    { id: "add-to-codex", label: "Add to Codex" },
     { id: "open-in-new-tab", label: "Open in new tab" },
     { id: "create-copy", label: "Create copy" },
     { id: "copy-path", label: "Copy path" },
@@ -148,6 +152,8 @@ function getContextActions(item: DocumentTreeItem): Array<{ id: DocumentContextA
 
 function getContextActionIcon(actionId: DocumentContextAction) {
   switch (actionId) {
+    case "add-to-codex":
+      return <CodeIcon />;
     case "open-in-new-tab":
       return <OpenInNewTabIcon />;
     case "new-note":
@@ -176,6 +182,7 @@ export function DocumentsSidebar({
   onCreateNote,
   onCreateFolder,
   onOpenInNewTab,
+  onAddToCodex,
   onDuplicateItem,
   onCopyPath,
   onRenameItem,
@@ -399,7 +406,9 @@ export function DocumentsSidebar({
       return;
     }
 
-    if (actionId === "open-in-new-tab") {
+    if (actionId === "add-to-codex") {
+      onAddToCodex(targetId);
+    } else if (actionId === "open-in-new-tab") {
       onOpenInNewTab(targetId);
     } else if (actionId === "new-note") {
       beginInlineRenameForCreatedItem(onCreateNote(targetId));

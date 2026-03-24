@@ -46,6 +46,17 @@ export function RunIcon() {
   );
 }
 
+export function CaptureIcon() {
+  return (
+    <BaseIcon>
+      <rect x="9" y="4" width="6" height="11" rx="3" />
+      <path d="M7 10.5a5 5 0 1 0 10 0" />
+      <path d="M12 15.5V20" />
+      <path d="M9 20h6" />
+    </BaseIcon>
+  );
+}
+
 export function VaultIcon() {
   return (
     <BaseIcon>

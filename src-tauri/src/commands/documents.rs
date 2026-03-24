@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager};
 
@@ -22,15 +22,20 @@ fn sanitize_note_id(note_id: &str) -> String {
     }
 }
 
-fn resolve_notes_dir(app: &AppHandle, base_path: Option<String>) -> Result<PathBuf, String> {
+fn default_notes_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data directory: {}", error))
+        .map(|path| path.join("documents").join("notes"))
+}
+
+fn resolve_notes_dir_from_root(
+    default_notes_dir: &Path,
+    base_path: Option<String>,
+) -> Result<PathBuf, String> {
     let resolved_dir = match base_path {
         Some(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
-        _ => app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve app data directory: {}", error))?
-            .join("documents")
-            .join("notes"),
+        _ => default_notes_dir.to_path_buf(),
     };
 
     fs::create_dir_all(&resolved_dir).map_err(|error| {
@@ -44,14 +49,22 @@ fn resolve_notes_dir(app: &AppHandle, base_path: Option<String>) -> Result<PathB
     Ok(resolved_dir)
 }
 
+fn note_file_path_from_root(
+    default_notes_dir: &Path,
+    note_id: &str,
+    base_path: Option<String>,
+) -> Result<PathBuf, String> {
+    let notes_dir = resolve_notes_dir_from_root(default_notes_dir, base_path)?;
+    let file_name = format!("{}.md", sanitize_note_id(note_id));
+    Ok(notes_dir.join(file_name))
+}
+
 fn note_file_path(
     app: &AppHandle,
     note_id: &str,
     base_path: Option<String>,
 ) -> Result<PathBuf, String> {
-    let notes_dir = resolve_notes_dir(app, base_path)?;
-    let file_name = format!("{}.md", sanitize_note_id(note_id));
-    Ok(notes_dir.join(file_name))
+    note_file_path_from_root(&default_notes_dir(app)?, note_id, base_path)
 }
 
 #[tauri::command]
@@ -144,4 +157,60 @@ pub fn documents_copy_note(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn documents_resolve_note_path(
+    app: AppHandle,
+    note_id: String,
+    base_path: Option<String>,
+) -> Result<String, String> {
+    let file_path = note_file_path(&app, &note_id, base_path)?;
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::note_file_path_from_root;
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skala-documents-{label}-{suffix}"))
+    }
+
+    #[test]
+    fn note_file_path_uses_default_notes_root_when_base_path_is_empty() {
+        let default_root = unique_temp_dir("default-root");
+        let file_path = note_file_path_from_root(&default_root, "product sync", None).unwrap();
+
+        assert_eq!(file_path, default_root.join("product_sync.md"));
+        assert!(default_root.exists());
+
+        std::fs::remove_dir_all(default_root).unwrap();
+    }
+
+    #[test]
+    fn note_file_path_prefers_explicit_base_path() {
+        let default_root = unique_temp_dir("unused-default");
+        let explicit_root = unique_temp_dir("explicit-root");
+        let file_path = note_file_path_from_root(
+            &default_root,
+            "meeting/notes",
+            Some(explicit_root.to_string_lossy().to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(file_path, explicit_root.join("meeting_notes.md"));
+        assert!(explicit_root.exists());
+
+        if default_root.exists() {
+            std::fs::remove_dir_all(default_root).unwrap();
+        }
+        std::fs::remove_dir_all(explicit_root).unwrap();
+    }
 }

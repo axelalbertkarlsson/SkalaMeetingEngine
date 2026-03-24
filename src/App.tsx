@@ -1,16 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
 import { BottomPanel, type BottomPanelView } from "./components/shell/BottomPanel";
+import { CodexWorkbench } from "./components/shell/CodexWorkbench";
 import { ConfirmDialog } from "./components/shell/ConfirmDialog";
 import { RenameDialog } from "./components/shell/RenameDialog";
-import {
-  CodexTerminalPanel,
-  type CodexSessionState,
-  type CodexTerminalEntry,
-  type TerminalHostInfo
-} from "./components/shell/CodexTerminalPanel";
 import {
   CollapsibleSidebar,
   type SidebarGroupData
@@ -18,9 +11,11 @@ import {
 import { DocumentsSidebar, type DocumentTreeItem } from "./components/shell/DocumentsSidebar";
 import { InspectorPane, type InspectorSection } from "./components/shell/InspectorPane";
 import { RibbonRail, type RibbonSection, type RibbonUtilityAction } from "./components/shell/RibbonRail";
+import { RightDock, type RightDockTabId } from "./components/shell/RightDock";
 import { WorkspacePane } from "./components/shell/WorkspacePane";
 import { WindowTitleBar } from "./components/shell/WindowTitleBar";
 import {
+  CaptureIcon,
   CodeIcon,
   DocumentIcon,
   FolderIcon,
@@ -30,7 +25,6 @@ import {
   MoonIcon,
   PanelBottomIcon,
   PanelLeftIcon,
-  RunIcon,
   SunIcon,
   VaultIcon
 } from "./components/shell/icons";
@@ -48,12 +42,18 @@ import {
   type TranscriptionSettings
 } from "./lib/meetingApi";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
+import { useCodexController } from "./hooks/useCodexController";
 import {
   copyDocumentNoteFile,
   deleteDocumentNoteFile,
+  flushDocumentNoteDraftToFile,
+  getDocumentMarkdownStorageKey,
+  resolveDocumentNoteFilePath,
+  writeDocumentMarkdownToLocalStorage,
   writeDocumentNoteFile
 } from "./services/documentsFileStore";
-import type { RecordingSource, Run, RunStatus } from "./models/run";
+import type { Artifact, RecordingSource, Run, RunStatus } from "./models/run";
+import { CaptureScreen } from "./screens/CaptureScreen";
 import { CodexScreen } from "./screens/CodexScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { MeetingsScreen } from "./screens/MeetingsScreen";
@@ -65,6 +65,7 @@ import { VaultScreen } from "./screens/VaultScreen";
 type SectionId =
   | "home"
   | "meetings"
+  | "capture"
   | "vault"
   | "documents"
   | "runs"
@@ -72,51 +73,6 @@ type SectionId =
   | "settings";
 type ThemeMode = "dark" | "light";
 type DocumentsEditorFont = "ibm-plex-sans" | "switzer";
-
-interface SpawnCodexProcessResponse {
-  session_id: string;
-  status: string;
-  message: string;
-  terminal_mode: "full_screen" | "compact";
-  terminal_host: {
-    windows_pty: {
-      backend: "conpty" | "winpty";
-      build_number?: number | null;
-    } | null;
-  };
-  capture_bundle_path?: string | null;
-}
-
-interface OperationAck {
-  ok: boolean;
-  message: string;
-}
-
-
-interface TerminalExitEventPayload {
-  session_id: string;
-  code: number | null;
-  capture_bundle_path?: string | null;
-}
-
-interface TerminalLifecycleEventPayload {
-  session_id: string;
-  phase: "session_started" | "first_pty_output" | "stop_requested" | "resize_applied" | "exit_observed";
-  timestamp_ms: number;
-  terminal_mode: "full_screen" | "compact";
-  terminal_host: {
-    windows_pty: {
-      backend: "conpty" | "winpty";
-      build_number?: number | null;
-    } | null;
-  };
-  cols?: number | null;
-  rows?: number | null;
-  capture_bundle_path?: string | null;
-}
-
-const TERMINAL_EXIT_EVENT = "codex://terminal-exit";
-const TERMINAL_LIFECYCLE_EVENT = "codex://terminal-lifecycle";
 
 interface WorkspaceTabState {
   id: string;
@@ -131,6 +87,7 @@ interface WorkspaceTabState {
 const sectionTitles: Record<SectionId, string> = {
   home: "Home",
   meetings: "Meetings",
+  capture: "Capture",
   vault: "Vault",
   documents: "Documents",
   runs: "Runs",
@@ -141,9 +98,9 @@ const sectionTitles: Record<SectionId, string> = {
 const railSections: RibbonSection[] = [
   { id: "home", label: "Home", icon: <HomeIcon /> },
   { id: "meetings", label: "Meetings", icon: <MeetingIcon /> },
+  { id: "capture", label: "Capture", icon: <CaptureIcon /> },
   { id: "vault", label: "Vault", icon: <VaultIcon /> },
   { id: "documents", label: "Documents", icon: <DocumentIcon /> },
-  { id: "runs", label: "Runs", icon: <RunIcon /> },
   { id: "codex", label: "Codex", icon: <CodeIcon /> },
   { id: "settings", label: "Settings", icon: <GearIcon /> }
 ];
@@ -167,10 +124,6 @@ function isDocumentFolder(item: DocumentTreeItem) {
 
 function isDocumentNote(item: DocumentTreeItem) {
   return (item.kind ?? "folder") === "note";
-}
-
-function getDocumentMarkdownStorageKey(noteId: string) {
-  return `documents.markdown.${noteId}`;
 }
 
 function collectClonedNoteIdPairs(
@@ -516,22 +469,6 @@ function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-function mapTerminalHostInfo(hostInfo: {
-  windows_pty: {
-    backend: "conpty" | "winpty";
-    build_number?: number | null;
-  } | null;
-}): TerminalHostInfo {
-  return {
-    windowsPty: hostInfo.windows_pty
-      ? {
-          backend: hostInfo.windows_pty.backend,
-          buildNumber: hostInfo.windows_pty.build_number ?? undefined
-        }
-      : null
-  };
-}
-
 function isActiveRunStatus(status: RunStatus) {
   return [
     "queued",
@@ -555,15 +492,19 @@ function App() {
     "shell.sidebarCollapsed",
     false
   );
-  const [inspectorOpen, setInspectorOpen] = useLocalStorageState<boolean>("shell.inspectorOpen", false);
+  const [rightDockOpen, setRightDockOpen] = useLocalStorageState<boolean>("shell.rightDockOpen", false);
   const [bottomPanelOpen, setBottomPanelOpen] = useLocalStorageState<boolean>(
     "shell.bottomPanelOpen",
     false
   );
   const [sidebarWidth, setSidebarWidth] = useLocalStorageState<number>("shell.sidebarWidth", 268);
-  const [inspectorWidth, setInspectorWidth] = useLocalStorageState<number>(
-    "shell.inspectorWidth",
-    296
+  const [rightDockWidth, setRightDockWidth] = useLocalStorageState<number>(
+    "shell.rightDockWidth",
+    360
+  );
+  const [activeRightDockTab, setActiveRightDockTab] = useLocalStorageState<RightDockTabId>(
+    "shell.rightDockTab",
+    "codex"
   );
   const [bottomPanelHeight, setBottomPanelHeight] = useLocalStorageState<number>(
     "shell.bottomHeight",
@@ -584,7 +525,8 @@ function App() {
     "shell.sidebarSelections",
     {
       home: "home-recent-run",
-      meetings: "meetings-new-recording",
+      meetings: "meetings-view-month",
+      capture: "capture-new-recording",
       vault: "vault-info",
       documents: "documents-folder-bita",
       runs: "runs-running",
@@ -609,26 +551,9 @@ function App() {
     value: string;
   } | null>(null);
 
-  const [codexSession, setCodexSession] = useState<CodexSessionState>({
-    sessionId: null,
-    status: "idle",
-    message: "Ready",
-    lastExitCode: null,
-    terminalMode: null,
-    captureBundlePath: null,
-    lastLifecyclePhase: null,
-    lastResize: null
-  });
-  const [codexTerminalHostInfo, setCodexTerminalHostInfo] = useState<TerminalHostInfo | null>(null);
-  const [codexTerminalEntries, setCodexTerminalEntries] = useState<CodexTerminalEntry[]>([]);
-  const [codexTerminalClearSignal, setCodexTerminalClearSignal] = useState(0);
   const [codexCommandPath, setCodexCommandPath] = useLocalStorageState<string>(
     "settings.codex.commandPath",
     "codex"
-  );
-  const [codexDisableAltScreen, setCodexDisableAltScreen] = useLocalStorageState<boolean>(
-    "settings.codex.disableAltScreen",
-    false
   );
   const [codexCaptureDebugBundle, setCodexCaptureDebugBundle] = useLocalStorageState<boolean>(
     "settings.codex.captureDebugBundle",
@@ -698,10 +623,11 @@ function App() {
     }),
     [sortedRuns]
   );
-
-  const appendTerminalEntry = useCallback((entry: CodexTerminalEntry) => {
-    setCodexTerminalEntries((current) => [...current.slice(-499), entry]);
-  }, []);
+  const codexController = useCodexController({
+    workspaceRoot: workspace.rootPath,
+    commandPath: codexCommandPath,
+    captureDebugBundle: codexCaptureDebugBundle
+  });
 
   const sidebarGroupsBySection = useMemo<Record<SectionId, SidebarGroupData[]>>(() => {
     const recentMeetingRuns = sortedRuns.filter(
@@ -754,19 +680,46 @@ function App() {
       ],
       meetings: [
         {
-          id: "meetings-actions",
-          title: "Meeting actions",
+          id: "meetings-views",
+          title: "Calendar views",
           items: [
-            { id: "meetings-new-recording", label: "New recording", meta: "Mic or mixed input" },
-            { id: "meetings-import", label: "Import meeting", meta: "Audio or video file" }
+            { id: "meetings-view-month", label: "Month", meta: "Planner grid" },
+            { id: "meetings-view-week", label: "Week", meta: "Time-grid overview" },
+            { id: "meetings-view-day", label: "Day", meta: "Single-day focus" }
           ]
         },
         {
-          id: "meetings-recent-runs",
-          title: "Recent meeting runs",
+          id: "meetings-focus",
+          title: "Focus",
+          items: [
+            { id: "meetings-focus-today", label: "Today", meta: "Jump to current date" },
+            { id: "meetings-focus-upcoming", label: "Upcoming", meta: "Agenda side panel" }
+          ]
+        },
+        {
+          id: "meetings-sources",
+          title: "Source model",
+          items: [
+            { id: "meetings-source-ics", label: "ICS subscriptions", meta: "Primary V1 ingestion" },
+            { id: "meetings-source-imports", label: "ICS imports", meta: "Stored per workspace" }
+          ]
+        }
+      ],
+      capture: [
+        {
+          id: "capture-actions",
+          title: "Capture actions",
+          items: [
+            { id: "capture-new-recording", label: "New recording", meta: "Mic or mixed input" },
+            { id: "capture-import", label: "Import meeting", meta: "Audio or video file" }
+          ]
+        },
+        {
+          id: "capture-recent-runs",
+          title: "Recent capture runs",
           items: recentMeetingRuns.slice(0, 6).map((run) =>
             makeRunRow(
-              `meetings-run-${run.id}`,
+              `capture-run-${run.id}`,
               run.title,
               `${statusLabels[run.status]} - ${new Date(run.startedAt).toLocaleDateString()}`,
               statusTone[run.status]
@@ -774,12 +727,19 @@ function App() {
           )
         },
         {
-          id: "meetings-drafts",
-          title: "Drafts",
-          items: [
-            { id: "meetings-draft-notes", label: "Q2 planning notes", meta: "Clean transcript draft" },
-            { id: "meetings-draft-retro", label: "Sprint retrospective", meta: "Pending owner mapping" }
-          ]
+          id: "capture-review",
+          title: "Review queue",
+          items: awaitingReview
+            .filter((run) => run.type === "meeting_import" || run.type === "meeting_recording")
+            .slice(0, 4)
+            .map((run) =>
+              makeRunRow(
+                `capture-review-${run.id}`,
+                run.title,
+                run.summary ?? "Ready for transcript review",
+                statusTone[run.status]
+              )
+            )
         }
       ],
       runs: [
@@ -1064,6 +1024,12 @@ function App() {
   );
 
   useEffect(() => {
+    if (activeSection === "runs") {
+      setActiveSection("capture");
+    }
+  }, [activeSection, setActiveSection]);
+
+  useEffect(() => {
     void refreshMeetingRuns();
   }, [refreshMeetingRuns]);
 
@@ -1114,7 +1080,14 @@ function App() {
 
       if (key === "i") {
         event.preventDefault();
-        setInspectorOpen((current) => !current);
+        setRightDockOpen((current) => {
+          if (current) {
+            return false;
+          }
+
+          setActiveRightDockTab("codex");
+          return true;
+        });
       }
 
       if (key === "j") {
@@ -1138,107 +1111,7 @@ function App() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [setBottomPanelOpen, setInspectorOpen, setSidebarCollapsed]);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      return;
-    }
-
-    void invoke<SpawnCodexProcessResponse["terminal_host"]>("get_terminal_host_info")
-      .then((hostInfo) => {
-        setCodexTerminalHostInfo(mapTerminalHostInfo(hostInfo));
-      })
-      .catch(() => {
-        setCodexTerminalHostInfo(null);
-      });
-  }, []);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      return;
-    }
-
-    const unlistenFns: UnlistenFn[] = [];
-    let disposed = false;
-
-    const attachListeners = async () => {
-      try {
-        const unlistenLifecycle = await listen<TerminalLifecycleEventPayload>(TERMINAL_LIFECYCLE_EVENT, (event) => {
-          setCodexTerminalHostInfo(mapTerminalHostInfo(event.payload.terminal_host));
-
-          setCodexSession((current) => {
-            if (current.sessionId !== event.payload.session_id) {
-              return current;
-            }
-
-            return {
-              ...current,
-              terminalMode: event.payload.terminal_mode,
-              captureBundlePath: event.payload.capture_bundle_path ?? current.captureBundlePath,
-              lastLifecyclePhase: event.payload.phase,
-              lastResize:
-                event.payload.phase === "resize_applied" &&
-                typeof event.payload.cols === "number" &&
-                typeof event.payload.rows === "number"
-                  ? { cols: event.payload.cols, rows: event.payload.rows }
-                  : current.lastResize
-            };
-          });
-        });
-
-        const unlistenExit = await listen<TerminalExitEventPayload>(TERMINAL_EXIT_EVENT, (event) => {
-          setCodexSession((current) => {
-            if (current.sessionId !== event.payload.session_id) {
-              return current;
-            }
-
-            return {
-              ...current,
-              status: "stopped",
-              message: event.payload.capture_bundle_path
-                ? `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}. Capture bundle: ${event.payload.capture_bundle_path}`
-                : `Process exited${event.payload.code === null ? "" : ` with code ${event.payload.code}`}.`,
-              lastExitCode: event.payload.code,
-              captureBundlePath: event.payload.capture_bundle_path ?? current.captureBundlePath,
-              lastLifecyclePhase: "exit_observed"
-            };
-          });
-
-          appendTerminalEntry({
-            sessionId: event.payload.session_id,
-            text:
-              event.payload.code === null
-                ? `\n[system] Codex process exited.${event.payload.capture_bundle_path ? `\n[system] Capture bundle: ${event.payload.capture_bundle_path}` : ""}\n`
-                : `\n[system] Codex process exited with code ${event.payload.code}.${event.payload.capture_bundle_path ? `\n[system] Capture bundle: ${event.payload.capture_bundle_path}` : ""}\n`
-          });
-        });
-
-        if (disposed) {
-          unlistenLifecycle();
-          unlistenExit();
-          return;
-        }
-
-        unlistenFns.push(unlistenLifecycle);
-        unlistenFns.push(unlistenExit);
-      } catch (error) {
-        appendTerminalEntry({
-          sessionId: "unknown",
-          text: `\n[system] Failed to register terminal listeners: ${String(error)}\n`
-        });
-      }
-    };
-
-    void attachListeners();
-
-    return () => {
-      disposed = true;
-      unlistenFns.forEach((unlisten) => {
-        unlisten();
-      });
-    };
-  }, [appendTerminalEntry]);
+  }, [setActiveRightDockTab, setBottomPanelOpen, setRightDockOpen, setSidebarCollapsed]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1311,8 +1184,8 @@ function App() {
       return appendDocumentItem(currentItems, resolvedParentFolderId, nextItem);
     });
 
-    if (kind === "note" && typeof window !== "undefined") {
-      window.localStorage.setItem(getDocumentMarkdownStorageKey(nextId), JSON.stringify(""));
+    if (kind === "note") {
+      writeDocumentMarkdownToLocalStorage(nextId, "");
     }
     if (kind === "note") {
       void writeDocumentNoteFile(nextId, "", documentsBasePath);
@@ -1495,14 +1368,14 @@ function App() {
     const clonedNotePairs = collectClonedNoteIdPairs(sourceItem, duplicateItem);
     if (typeof window !== "undefined") {
       for (const [sourceNoteId, clonedNoteId] of clonedNotePairs) {
-        const sourceKey = getDocumentMarkdownStorageKey(sourceNoteId);
-        const targetKey = getDocumentMarkdownStorageKey(clonedNoteId);
-        const serializedMarkdown = window.localStorage.getItem(sourceKey);
+        const serializedMarkdown = window.localStorage.getItem(
+          getDocumentMarkdownStorageKey(sourceNoteId)
+        );
 
         if (serializedMarkdown === null) {
-          window.localStorage.removeItem(targetKey);
+          window.localStorage.removeItem(getDocumentMarkdownStorageKey(clonedNoteId));
         } else {
-          window.localStorage.setItem(targetKey, serializedMarkdown);
+          window.localStorage.setItem(getDocumentMarkdownStorageKey(clonedNoteId), serializedMarkdown);
         }
       }
     }
@@ -1741,194 +1614,57 @@ function App() {
 
     return undefined;
   })();
-
-  const handleStartCodexSession = useCallback(() => {
-    void (async () => {
-      if (codexSession.status === "running" || codexSession.status === "starting") {
-        return;
+  const openCodexDock = useCallback(
+    (focusComposer = false) => {
+      setRightDockOpen(true);
+      setActiveRightDockTab("codex");
+      if (focusComposer) {
+        codexController.requestComposerFocus();
       }
+    },
+    [codexController, setActiveRightDockTab, setRightDockOpen]
+  );
 
-      const commandPath = codexCommandPath.trim() || "codex";
-
-      setBottomPanelOpen(true);
-      setActiveBottomViewId("terminal");
-      setCodexTerminalEntries([]);
-      setCodexSession((current) => ({
-        ...current,
-        status: "starting",
-        message: "Starting Codex process...",
-        lastExitCode: null,
-        terminalMode: codexDisableAltScreen ? "compact" : "full_screen",
-        captureBundlePath: null,
-        lastLifecyclePhase: null,
-        lastResize: null
-      }));
-
-      if (!isTauriRuntime()) {
-        setCodexSession((current) => ({
-          ...current,
-          status: "error",
-          message: "Tauri runtime unavailable (web dev mode).",
-          terminalMode: null
-        }));
-        appendTerminalEntry({
-          sessionId: "local-preview",
-          text: "\n[system] Tauri runtime unavailable, cannot spawn Codex here.\n"
-        });
-        return;
-      }
-
-      try {
-        const response = await invoke<SpawnCodexProcessResponse>("spawn_codex_process", {
-          request: {
-            workspace_path: workspace.rootPath,
-            command: commandPath,
-            args: codexDisableAltScreen ? ["--no-alt-screen"] : [],
-            capture_debug_bundle: codexCaptureDebugBundle
-          }
-        });
-
-        setCodexSession({
-          sessionId: response.session_id,
-          status: "running",
-          message: response.capture_bundle_path
-            ? `${response.message} Capture bundle: ${response.capture_bundle_path}`
-            : response.message,
-          lastExitCode: null,
-          terminalMode: response.terminal_mode,
-          captureBundlePath: response.capture_bundle_path ?? null,
-          lastLifecyclePhase: "session_started",
-          lastResize: null
-        });
-        setCodexTerminalHostInfo(mapTerminalHostInfo(response.terminal_host));
-
-        if (response.capture_bundle_path) {
-          appendTerminalEntry({
-            sessionId: response.session_id,
-            text: `\n[system] Debug capture bundle: ${response.capture_bundle_path}\n`
-          });
-        }
-      } catch (error) {
-        const message = `Failed to start Codex: ${String(error)}`;
-        setCodexSession((current) => ({
-          ...current,
-          status: "error",
-          message
-        }));
-
-        appendTerminalEntry({
-          sessionId: codexSession.sessionId ?? "unknown",
-          text: `\n[system] ${message}\n`
-        });
-      }
-    })();
-  }, [
-    appendTerminalEntry,
-    codexCaptureDebugBundle,
-    codexCommandPath,
-    codexDisableAltScreen,
-    codexSession.sessionId,
-    codexSession.status,
-    workspace.rootPath
-  ]);
-
-  const handleStopCodexSession = useCallback(() => {
-    void (async () => {
-      if (!codexSession.sessionId) {
-        return;
-      }
-
-      setCodexSession((current) => ({
-        ...current,
-        status: "stopping",
-        message: "Stopping Codex process..."
-      }));
-
-      try {
-        const response = await invoke<OperationAck>("stop_codex_process", {
-          request: {
-            session_id: codexSession.sessionId
-          }
-        });
-
-        appendTerminalEntry({
-          sessionId: codexSession.sessionId,
-          text: `\n[system] ${response.message}\n`
-        });
-      } catch (error) {
-        const message = `Failed to stop Codex: ${String(error)}`;
-        setCodexSession((current) => ({
-          ...current,
-          status: "error",
-          message
-        }));
-
-        appendTerminalEntry({
-          sessionId: codexSession.sessionId,
-          text: `\n[system] ${message}\n`
-        });
-      }
-    })();
-  }, [appendTerminalEntry, codexSession.sessionId]);
-
-  const handleSendCodexInput = useCallback(
-    (input: string) => {
+  const handleAddDocumentToCodex = useCallback(
+    (itemId: string) => {
       void (async () => {
-        if (!codexSession.sessionId || codexSession.status !== "running") {
+        const item = findDocumentItem(documentsSidebarItems, itemId);
+        if (!item || isDocumentFolder(item)) {
           return;
         }
 
-        try {
-          await invoke<OperationAck>("send_codex_input", {
-            request: {
-              session_id: codexSession.sessionId,
-              input
-            }
-          });
-        } catch (error) {
-          appendTerminalEntry({
-            sessionId: codexSession.sessionId,
-            text: `\n[system] Failed to send input: ${String(error)}\n`
-          });
-        }
-      })();
-    },
-    [appendTerminalEntry, codexSession.sessionId, codexSession.status]
-  );
-
-
-  const handleResizeCodexTerminal = useCallback(
-    (cols: number, rows: number) => {
-      void (async () => {
-        if (!codexSession.sessionId || codexSession.status !== "running") {
+        openCodexDock(true);
+        await flushDocumentNoteDraftToFile(item.id, documentsBasePath);
+        const resolvedPath = await resolveDocumentNoteFilePath(item.id, documentsBasePath);
+        if (!resolvedPath) {
           return;
         }
 
-        try {
-          await invoke<OperationAck>("resize_codex_terminal", {
-            request: {
-              session_id: codexSession.sessionId,
-              cols,
-              rows
-            }
-          });
-        } catch {
-          // Resize events are frequent and best-effort only.
-        }
+        codexController.addContextItem({
+          id: `codex-document-${item.id}`,
+          kind: "document_note",
+          label: item.label,
+          path: resolvedPath,
+          sourceId: item.id
+        });
       })();
     },
-    [codexSession.sessionId, codexSession.status]
+    [codexController, documentsBasePath, documentsSidebarItems, openCodexDock]
   );
-  const handleClearTerminal = useCallback(() => {
-    setCodexTerminalEntries([]);
-    setCodexTerminalClearSignal((current) => current + 1);
-  }, []);
 
-  useEffect(() => {
-    if (contentSection === "codex" && codexSession.sessionId) {
-      setActiveBottomViewId("terminal");
-    }
-  }, [codexSession.sessionId, contentSection]);
+  const handleAddMeetingArtifactToCodex = useCallback(
+    (run: Run, artifact: Artifact) => {
+      openCodexDock(true);
+      codexController.addContextItem({
+        id: `codex-artifact-${run.id}-${artifact.id}`,
+        kind: "meeting_artifact",
+        label: `${run.title} - ${artifact.label ?? artifact.kind.replace(/_/g, " ")}`,
+        path: artifact.path,
+        sourceId: artifact.id
+      });
+    },
+    [codexController, openCodexDock]
+  );
 
   const inspectorSections = useMemo<InspectorSection[]>(() => {
     const latestRun = sortedRuns[0];
@@ -1984,6 +1720,32 @@ function App() {
       ];
     }
 
+    if (contentSection === "capture") {
+      const run = meetingRuns[0];
+      return [
+        {
+          id: "capture-selection",
+          title: "Capture context",
+          rows: run
+            ? [
+                { label: "Latest run", value: run.title },
+                { label: "Status", value: statusLabels[run.status], tone: statusTone[run.status] },
+                { label: "Started", value: new Date(run.startedAt).toLocaleString() }
+              ]
+            : [{ label: "Status", value: "No capture runs yet", tone: "neutral" }]
+        },
+        {
+          id: "capture-flow",
+          title: "Workflow",
+          rows: [
+            { label: "Inputs", value: "Import, microphone, system audio, mixed" },
+            { label: "Artifacts", value: "Recording, transcript, cleanup, logs" },
+            { label: "Review", value: "Explicit transcript inspection", tone: "warning" }
+          ]
+        }
+      ];
+    }
+
     if (contentSection === "documents") {
       return [
         {
@@ -2032,22 +1794,12 @@ function App() {
           title: "Session metadata",
           rows: [
             { label: "Workspace", value: workspace.rootPath },
-            { label: "Session", value: codexSession.sessionId ?? "None" },
-            { label: "Status", value: codexSession.status },
+            { label: "Connection", value: codexController.session.connectionId ?? "None" },
+            { label: "Thread", value: codexController.session.threadId ?? "None" },
+            { label: "Status", value: codexController.session.status },
             {
-              label: "Terminal mode",
-              value:
-                codexSession.terminalMode === "compact"
-                  ? "Compact fallback"
-                  : codexSession.terminalMode === "full_screen"
-                    ? "Full-screen primary"
-                    : "Not started"
-            },
-            {
-              label: "PTY host",
-              value: codexTerminalHostInfo?.windowsPty
-                ? `${codexTerminalHostInfo.windowsPty.backend} ${codexTerminalHostInfo.windowsPty.buildNumber ?? ""}`.trim()
-                : "Unavailable"
+              label: "Active turn",
+              value: codexController.session.activeTurnId ?? "Idle"
             }
           ]
         },
@@ -2055,14 +1807,36 @@ function App() {
           id: "codex-next",
           title: "Bridge state",
           rows: [
-            { label: "System entries", value: String(codexTerminalEntries.length) },
-            { label: "Last exit", value: codexSession.lastExitCode === null ? "N/A" : String(codexSession.lastExitCode) },
-            { label: "Lifecycle", value: codexSession.lastLifecyclePhase ?? "idle" },
+            { label: "Conversation items", value: String(codexController.conversationEntries.length) },
+            { label: "Pending send", value: codexController.pendingSend ? "Queued" : "None" },
             {
-              label: "Last size",
-              value: codexSession.lastResize ? `${codexSession.lastResize.cols}x${codexSession.lastResize.rows}` : "N/A"
+              label: "Pending input request",
+              value: codexController.pendingUserInputRequest ? "Awaiting answer" : "None"
             },
-            { label: "Capture", value: codexSession.captureBundlePath ?? "Disabled" }
+            { label: "Last event", value: codexController.session.lastEventMethod ?? "idle" }
+          ]
+        }
+      ];
+    }
+
+    if (contentSection === "meetings") {
+      return [
+        {
+          id: "meetings-context",
+          title: "Calendar context",
+          rows: [
+            { label: "Source model", value: "ICS imports + subscriptions" },
+            { label: "Views", value: "Month, week, day, agenda" },
+            { label: "Timezone", value: Intl.DateTimeFormat().resolvedOptions().timeZone }
+          ]
+        },
+        {
+          id: "meetings-behavior",
+          title: "V1 behavior",
+          rows: [
+            { label: "Rendering", value: "Provider-agnostic normalized events" },
+            { label: "Recurrence", value: "Practical RRULE expansion" },
+            { label: "Review style", value: "Calendar-first workspace view" }
           ]
         }
       ];
@@ -2096,9 +1870,7 @@ function App() {
       }
     ];
   }, [
-    codexSession,
-    codexTerminalEntries.length,
-    codexTerminalHostInfo,
+    codexController,
     contentSection,
     runStats,
     selectedDocumentFolderLabel,
@@ -2116,7 +1888,7 @@ function App() {
         lines: [
           `[status] Section: ${sectionTitles[contentSection]}`,
           `[status] Sidebar: ${sidebarCollapsed ? "collapsed" : "open"} (${Math.round(sidebarWidth)}px)`,
-          `[status] Inspector: ${inspectorOpen ? "open" : "closed"} (${Math.round(inspectorWidth)}px)`,
+          `[status] Right dock: ${rightDockOpen ? "open" : "closed"} (${Math.round(rightDockWidth)}px)`,
           `[status] Bottom panel: ${bottomPanelOpen ? "open" : "closed"} (${Math.round(effectiveBottomPanelHeight)}px)`
         ]
       },
@@ -2134,58 +1906,22 @@ function App() {
         id: "codex",
         label: "Codex output",
         lines: [
-          "$ codex --workspace .",
-          "Interactive stream is now available in the Terminal tab on the Codex screen.",
-          `Session status: ${codexSession.status}`,
-          `Terminal mode: ${
-            codexSession.terminalMode === "compact"
-              ? "Compact fallback"
-              : codexSession.terminalMode === "full_screen"
-                ? "Full-screen primary"
-                : "Not started"
-          }`
+          "$ codex app-server",
+          "Global dock and Codex page now share one live app-server thread controller.",
+          `Session status: ${codexController.session.status}`,
+          `Thread: ${codexController.session.threadId ?? "Not started"}`
         ]
       }
     ];
-
-    if (contentSection === "codex") {
-      views.push({
-        id: "terminal",
-        label: "Terminal",
-        content: (
-          <CodexTerminalPanel
-            session={codexSession}
-            terminalHostInfo={codexTerminalHostInfo}
-            entries={codexTerminalEntries}
-            clearSignal={codexTerminalClearSignal}
-            captureEnabled={codexCaptureDebugBundle}
-            onStart={handleStartCodexSession}
-            onStop={handleStopCodexSession}
-            onClear={handleClearTerminal}
-            onSendInput={handleSendCodexInput}
-            onResizeTerminal={handleResizeCodexTerminal}
-          />
-        )
-      });
-    }
 
     return views;
   }, [
     effectiveBottomPanelHeight,
     bottomPanelOpen,
-    codexCaptureDebugBundle,
-    codexTerminalHostInfo,
-    codexSession,
-    codexTerminalClearSignal,
-    codexTerminalEntries,
+    codexController,
     contentSection,
-    handleClearTerminal,
-    handleSendCodexInput,
-    handleResizeCodexTerminal,
-    handleStartCodexSession,
-    handleStopCodexSession,
-    inspectorOpen,
-    inspectorWidth,
+    rightDockOpen,
+    rightDockWidth,
     sidebarCollapsed,
     sidebarWidth
   ]);
@@ -2394,19 +2130,19 @@ function App() {
     window.addEventListener("mouseup", onMouseUp);
   };
 
-  const beginInspectorResize = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!inspectorOpen) {
+  const beginRightDockResize = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!rightDockOpen) {
       return;
     }
 
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = inspectorWidth;
+    const startWidth = rightDockWidth;
     document.body.style.cursor = "col-resize";
 
     const onMouseMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 220, 340));
-      setInspectorWidth(nextWidth);
+      const nextWidth = Math.round(clamp(startWidth - (moveEvent.clientX - startX), 300, 540));
+      setRightDockWidth(nextWidth);
     };
 
     const onMouseUp = () => {
@@ -2454,8 +2190,12 @@ function App() {
     }
 
     if (sectionId === "meetings") {
+      return <MeetingsScreen workspace={workspace} sidebarSelection={selectedSidebarItemId} />;
+    }
+
+    if (sectionId === "capture") {
       return (
-        <MeetingsScreen
+        <CaptureScreen
           workspace={workspace}
           runs={meetingRuns}
           loading={meetingRunsLoading}
@@ -2483,7 +2223,32 @@ function App() {
     }
 
     if (sectionId === "codex") {
-      return <CodexScreen workspace={workspace} />;
+      return (
+        <CodexScreen
+          workspace={workspace}
+          session={codexController.session}
+          draft={codexController.draft}
+          contextItems={codexController.contextItems}
+          conversationEntries={codexController.conversationEntries}
+          highlightedContextItemId={codexController.highlightedContextItemId}
+          pendingSendId={codexController.pendingSend?.id ?? null}
+          composerFocusSignal={codexController.composerFocusSignal}
+          canSend={codexController.canSend}
+          pendingUserInputRequest={codexController.pendingUserInputRequest}
+          lastSubmittedPrompt={codexController.lastSubmittedPrompt}
+          onDraftChange={codexController.setDraft}
+          onStart={() => {
+            void codexController.startSession();
+          }}
+          onStop={codexController.stopSession}
+          onSend={codexController.sendDraft}
+          onClearConversation={codexController.clearConversation}
+          onClearContextItems={codexController.clearContextItems}
+          onRemoveContextItem={codexController.removeContextItem}
+          onSubmitUserInputRequest={codexController.submitUserInputRequest}
+          onNewChat={codexController.startNewChat}
+        />
+      );
     }
 
     return (
@@ -2491,7 +2256,6 @@ function App() {
         workspace={workspace}
         selectedCategory={settingsCategory}
         codexCommandPath={codexCommandPath}
-        codexDisableAltScreen={codexDisableAltScreen}
         codexCaptureDebugBundle={codexCaptureDebugBundle}
         documentsOpenInNewTab={documentsOpenInNewTab}
         documentsBasePath={documentsBasePath}
@@ -2499,7 +2263,6 @@ function App() {
         transcriptionSettings={transcriptionSettings}
         transcriptionStatusMessage={transcriptionStatusMessage}
         onCodexCommandPathChange={setCodexCommandPath}
-        onCodexDisableAltScreenChange={setCodexDisableAltScreen}
         onCodexCaptureDebugBundleChange={setCodexCaptureDebugBundle}
         onDocumentsOpenInNewTabChange={setDocumentsOpenInNewTab}
         onDocumentsBasePathChange={setDocumentsBasePath}
@@ -2538,12 +2301,12 @@ function App() {
       <AppShell
       sidebarCollapsed={sidebarCollapsed}
       sidebarWidth={sidebarWidth}
-        inspectorOpen={inspectorOpen}
-        inspectorWidth={inspectorWidth}
+        rightDockOpen={rightDockOpen}
+        rightDockWidth={rightDockWidth}
         bottomPanelOpen={bottomPanelOpen}
         bottomPanelHeight={effectiveBottomPanelHeight}
         onSidebarResizeStart={beginSidebarResize}
-        onInspectorResizeStart={beginInspectorResize}
+        onRightDockResizeStart={beginRightDockResize}
         onBottomPanelResizeStart={beginBottomResize}
       rail={
         <RibbonRail
@@ -2587,6 +2350,7 @@ function App() {
             onCreateNote={handleCreateDocumentNote}
             onCreateFolder={handleCreateDocumentFolder}
             onOpenInNewTab={handleOpenDocumentInNewTab}
+            onAddToCodex={handleAddDocumentToCodex}
             onDuplicateItem={handleDuplicateDocumentItem}
             onCopyPath={handleCopyDocumentPath}
             onRenameItem={handleRenameDocumentItem}
@@ -2614,7 +2378,21 @@ function App() {
           />
         )
       }
-      topRightControls={<WindowTitleBar inspectorOpen={inspectorOpen} onToggleInspector={() => setInspectorOpen((current) => !current)} />}
+      topRightControls={
+        <WindowTitleBar
+          rightDockOpen={rightDockOpen}
+          onToggleRightDock={() =>
+            setRightDockOpen((current) => {
+              if (current) {
+                return false;
+              }
+
+              setActiveRightDockTab("codex");
+              return true;
+            })
+          }
+        />
+      }
       workspace={
         <WorkspacePane
           tabs={tabs}
@@ -2629,7 +2407,46 @@ function App() {
           {renderWorkspaceContent()}
         </WorkspacePane>
       }
-      inspector={<InspectorPane title={sectionTitles[contentSection]} sections={inspectorSections} />}
+      rightDock={
+        <RightDock
+          activeTabId={activeRightDockTab}
+          codexContent={
+            <CodexWorkbench
+              variant="dock"
+              workspacePath={workspace.rootPath}
+              session={codexController.session}
+              draft={codexController.draft}
+              contextItems={codexController.contextItems}
+              conversationEntries={codexController.conversationEntries}
+              highlightedContextItemId={codexController.highlightedContextItemId}
+              pendingSendId={codexController.pendingSend?.id ?? null}
+              composerFocusSignal={codexController.composerFocusSignal}
+              canSend={codexController.canSend}
+              pendingUserInputRequest={codexController.pendingUserInputRequest}
+              lastSubmittedPrompt={codexController.lastSubmittedPrompt}
+              onDraftChange={codexController.setDraft}
+              onStart={() => {
+                void codexController.startSession();
+              }}
+              onStop={codexController.stopSession}
+              onSend={codexController.sendDraft}
+              onClearConversation={codexController.clearConversation}
+              onClearContextItems={codexController.clearContextItems}
+              onRemoveContextItem={codexController.removeContextItem}
+              onSubmitUserInputRequest={codexController.submitUserInputRequest}
+              onNewChat={codexController.startNewChat}
+              onOpenPage={() => openSection("codex")}
+            />
+          }
+          infoContent={
+            <InspectorPane
+              eyebrow="Info"
+              title={sectionTitles[contentSection]}
+              sections={inspectorSections}
+            />
+          }
+        />
+      }
       bottomPanel={
         <BottomPanel
           views={bottomPanelViews}
