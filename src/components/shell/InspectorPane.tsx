@@ -13,13 +13,14 @@ export interface InspectorSection {
 interface InspectorPaneProps {
   title: string;
   sections: InspectorSection[];
+  eyebrow?: string;
 }
 
-export function InspectorPane({ title, sections }: InspectorPaneProps) {
+export function InspectorPane({ title, sections, eyebrow = "Info" }: InspectorPaneProps) {
   return (
     <div className="inspector-pane">
       <header className="inspector-header">
-        <p className="pane-eyebrow">Inspector</p>
+        <p className="pane-eyebrow">{eyebrow}</p>
         <h2 className="pane-title">{title}</h2>
       </header>
 

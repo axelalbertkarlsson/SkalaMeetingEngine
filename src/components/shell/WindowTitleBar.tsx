@@ -9,11 +9,11 @@ import {
 } from "./icons";
 
 interface WindowTitleBarProps {
-  inspectorOpen: boolean;
-  onToggleInspector: () => void;
+  rightDockOpen: boolean;
+  onToggleRightDock: () => void;
 }
 
-export function WindowTitleBar({ inspectorOpen, onToggleInspector }: WindowTitleBarProps) {
+export function WindowTitleBar({ rightDockOpen, onToggleRightDock }: WindowTitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -75,10 +75,10 @@ export function WindowTitleBar({ inspectorOpen, onToggleInspector }: WindowTitle
     <div className="window-controls" role="toolbar" aria-label="Window controls">
       <button
         type="button"
-        className={`window-control-button utility${inspectorOpen ? " active" : ""}`}
-        aria-label={inspectorOpen ? "Close inspector" : "Open inspector"}
-        title={inspectorOpen ? "Close inspector (Ctrl/Cmd+I)" : "Open inspector (Ctrl/Cmd+I)"}
-        onClick={onToggleInspector}
+        className={`window-control-button utility${rightDockOpen ? " active" : ""}`}
+        aria-label={rightDockOpen ? "Close right dock" : "Open right dock"}
+        title={rightDockOpen ? "Close right dock (Ctrl/Cmd+I)" : "Open right dock (Ctrl/Cmd+I)"}
+        onClick={onToggleRightDock}
       >
         <PanelRightIcon />
       </button>

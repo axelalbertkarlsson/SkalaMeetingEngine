@@ -4,19 +4,19 @@ import { Divider } from "./shell/Divider";
 interface AppShellProps {
   sidebarCollapsed: boolean;
   sidebarWidth: number;
-  inspectorOpen: boolean;
-  inspectorWidth: number;
+  rightDockOpen: boolean;
+  rightDockWidth: number;
   bottomPanelOpen: boolean;
   bottomPanelHeight: number;
   onSidebarResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
-  onInspectorResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
+  onRightDockResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onBottomPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   rail: ReactNode;
   sidebar: ReactNode;
   leftHeader: ReactNode;
   workspace: ReactNode;
   topRightControls?: ReactNode;
-  inspector: ReactNode;
+  rightDock: ReactNode;
   bottomPanel: ReactNode;
   children?: ReactNode;
 }
@@ -25,19 +25,19 @@ export function AppShell(props: AppShellProps) {
   const {
     sidebarCollapsed,
     sidebarWidth,
-    inspectorOpen,
-    inspectorWidth,
+    rightDockOpen,
+    rightDockWidth,
     bottomPanelOpen,
     bottomPanelHeight,
     onSidebarResizeStart,
-    onInspectorResizeStart,
+    onRightDockResizeStart,
     onBottomPanelResizeStart,
     rail,
     sidebar,
     leftHeader,
     workspace,
     topRightControls,
-    inspector,
+    rightDock,
     bottomPanel,
     children
   } = props;
@@ -45,10 +45,10 @@ export function AppShell(props: AppShellProps) {
   const style = {
     "--sidebar-size": sidebarCollapsed ? "0px" : `${Math.round(sidebarWidth)}px`,
     "--sidebar-handle-size": "0px",
-    "--inspector-size": inspectorOpen ? `${Math.round(inspectorWidth)}px` : "0px",
-    "--inspector-handle-size": inspectorOpen ? "1px" : "0px",
+    "--inspector-size": rightDockOpen ? `${Math.round(rightDockWidth)}px` : "0px",
+    "--inspector-handle-size": rightDockOpen ? "1px" : "0px",
     "--bottom-size": bottomPanelOpen ? `${Math.round(bottomPanelHeight)}px` : "0px",
-    "--tabs-right-padding": inspectorOpen ? "8px" : "calc(var(--window-controls-width) + 8px)"
+    "--tabs-right-padding": rightDockOpen ? "8px" : "calc(var(--window-controls-width) + 8px)"
   } as CSSProperties;
 
   return (
@@ -57,7 +57,7 @@ export function AppShell(props: AppShellProps) {
 
       {topRightControls ? <div className="app-shell-top-right-controls">{topRightControls}</div> : null}
 
-      {inspectorOpen ? <div className="app-shell-inspector-header-overlay" aria-hidden="true" /> : null}
+      {rightDockOpen ? <div className="app-shell-inspector-header-overlay" aria-hidden="true" /> : null}
 
       <div className="app-shell-rail">{rail}</div>
 
@@ -79,19 +79,19 @@ export function AppShell(props: AppShellProps) {
 
       <main className="app-shell-workspace">{workspace}</main>
 
-      {inspectorOpen && (
+      {rightDockOpen && (
         <div
           className="pane-handle pane-handle-vertical pane-handle-right"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize inspector"
-          onMouseDown={onInspectorResizeStart}
+          aria-label="Resize right dock"
+          onMouseDown={onRightDockResizeStart}
         >
           <Divider orientation="vertical" />
         </div>
       )}
 
-      {inspectorOpen && <aside className="app-shell-inspector">{inspector}</aside>}
+      {rightDockOpen && <aside className="app-shell-inspector">{rightDock}</aside>}
 
       {bottomPanelOpen && (
         <>

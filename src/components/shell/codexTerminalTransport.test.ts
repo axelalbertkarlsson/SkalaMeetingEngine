@@ -13,6 +13,24 @@ import {
   shouldForceTerminalResize,
   type TerminalQueuedWrite
 } from "./codexTerminalTransport.js";
+import {
+  appendTextToConversationEntry,
+  buildCodexPrompt,
+  clearComposerAfterSuccessfulSend,
+  createCodexConversationEntryFromItem,
+  extractTextFromUserMessageContent,
+  planCodexSend,
+  upsertCodexContextItem
+} from "../../lib/codexContext.js";
+import {
+  createInitialCodexThreadLocalState,
+  extractCodexThreadDetails,
+  getCodexThreadLocalStoreKey,
+  resolveCodexThreadTitle,
+  sanitizeCodexThreadLocalStore,
+  sortCodexThreads
+} from "../../lib/codexThreads.js";
+import type { CodexContextItem } from "../../models/codex.js";
 
 export interface TerminalHelperTestCase {
   name: string;
@@ -46,6 +64,16 @@ function asPtyWrite(seq: number, text: string): TerminalQueuedWrite {
     kind: "pty",
     seq,
     data: bytes
+  };
+}
+
+function asContextItem(path: string, label = "Context file"): CodexContextItem {
+  return {
+    id: `ctx-${label.toLowerCase().replace(/\s+/g, "-")}`,
+    kind: "document_note",
+    label,
+    path,
+    sourceId: label
   };
 }
 
@@ -240,6 +268,256 @@ export const tests: TerminalHelperTestCase[] = [
         }) === 0,
         "expected compact PTY writes to remain immediate"
       );
+    }
+  },
+  {
+    name: "upsertCodexContextItem deduplicates by absolute path and highlights the existing chip",
+    run() {
+      const first = asContextItem("C:\\notes\\sync.md", "Sync");
+      const duplicate = asContextItem("C:\\notes\\sync.md", "Another label");
+      const result = upsertCodexContextItem([first], duplicate);
+
+      assert(result.items.length === 1, `expected one chip after dedupe, received ${result.items.length}`);
+      assert(result.highlightedItemId === first.id, `expected ${first.id} to be highlighted`);
+      assert(!result.added, "expected duplicate add to avoid appending a second chip");
+    }
+  },
+  {
+    name: "buildCodexPrompt serializes explicit file context before the user draft",
+    run() {
+      const prompt = buildCodexPrompt("Summarize the meeting.", [
+        asContextItem("C:\\meeting\\cleaned.md", "Cleaned transcript"),
+        asContextItem("C:\\notes\\plan.md", "Planning note")
+      ]);
+
+      assert(
+        prompt === "Use these files as context:\n- C:\\meeting\\cleaned.md\n- C:\\notes\\plan.md\n\nSummarize the meeting.",
+        `unexpected prompt serialization: ${JSON.stringify(prompt)}`
+      );
+
+      assert(
+        buildCodexPrompt("Just draft", []) === "Just draft",
+        "expected plain draft to pass through when no chips are staged"
+      );
+    }
+  },
+  {
+    name: "planCodexSend queues the prompt when the first send must start a session",
+    run() {
+      const plan = planCodexSend("idle", "Review this note.", [
+        asContextItem("C:\\notes\\review.md", "Review note")
+      ]);
+
+      assert(plan.kind === "start_and_queue", `expected queued send plan, received ${plan.kind}`);
+      if (plan.kind !== "start_and_queue") {
+        throw new Error("expected start_and_queue plan");
+      }
+
+      assert(
+        plan.send.prompt.includes("Use these files as context:"),
+        "expected queued send prompt to include explicit file context"
+      );
+    }
+  },
+  {
+    name: "clearComposerAfterSuccessfulSend resets the draft and one-turn context chips",
+    run() {
+      const nextState = clearComposerAfterSuccessfulSend();
+      assert(nextState.draft === "", "expected draft to clear after a successful send");
+      assert(nextState.contextItems.length === 0, "expected one-turn context chips to clear after send");
+    }
+  },
+  {
+    name: "extractTextFromUserMessageContent keeps text payloads and mention paths readable",
+    run() {
+      const text = extractTextFromUserMessageContent([
+        { type: "text", text: "Use the transcript." },
+        { type: "mention", name: "transcript.md", path: "C:\\notes\\transcript.md" }
+      ]);
+
+      assert(
+        text === "Use the transcript.\nC:\\notes\\transcript.md",
+        `unexpected extracted user message text: ${JSON.stringify(text)}`
+      );
+    }
+  },
+  {
+    name: "createCodexConversationEntryFromItem maps agent and command items into feed entries",
+    run() {
+      const agentEntry = createCodexConversationEntryFromItem(
+        {
+          id: "agent-1",
+          type: "agentMessage",
+          text: "I reviewed the transcript.",
+          phase: "final_answer"
+        },
+        "turn-1"
+      );
+      const commandEntry = createCodexConversationEntryFromItem(
+        {
+          id: "cmd-1",
+          type: "commandExecution",
+          command: "rg TODO",
+          cwd: "C:\\workspace",
+          status: "completed",
+          aggregatedOutput: "TODO: fix transcript"
+        },
+        "turn-1"
+      );
+
+      assert(agentEntry?.kind === "agent_message", "expected an agent message entry");
+      assert(agentEntry?.text === "I reviewed the transcript.", "expected agent text to carry through");
+      assert(commandEntry?.kind === "command_execution", "expected a command execution entry");
+      assert(commandEntry?.meta === "C:\\workspace", "expected the command cwd to be preserved");
+    }
+  },
+  {
+    name: "appendTextToConversationEntry appends deltas onto the matching item only",
+    run() {
+      const updated = appendTextToConversationEntry(
+        [
+          {
+            id: "conversation-agent-1",
+            itemId: "agent-1",
+            kind: "agent_message",
+            title: "Codex",
+            text: "Partial",
+            turnId: "turn-1"
+          },
+          {
+            id: "conversation-event-1",
+            itemId: "event-1",
+            kind: "event",
+            title: "Event",
+            text: "Static"
+          }
+        ],
+        "agent-1",
+        " answer"
+      );
+
+      assert(updated[0]?.text === "Partial answer", "expected the matching entry to receive the delta");
+      assert(updated[1]?.text === "Static", "expected non-matching entries to remain unchanged");
+    }
+  },
+  {
+    name: "resolveCodexThreadTitle prefers local rename over server title and preview",
+    run() {
+      const title = resolveCodexThreadTitle(
+        {
+          id: "thread-1",
+          name: "Server title",
+          preview: "Prompt preview",
+          createdAt: null,
+          updatedAt: null,
+          status: "idle",
+          archived: false
+        },
+        {
+          ...createInitialCodexThreadLocalState(),
+          customTitle: "Local title"
+        }
+      );
+
+      assert(title === "Local title", `expected local title override, received ${JSON.stringify(title)}`);
+    }
+  },
+  {
+    name: "sanitizeCodexThreadLocalStore keeps valid thread drafts and drops malformed values",
+    run() {
+      const store = sanitizeCodexThreadLocalStore({
+        lastOpenedThreadId: "thread-1",
+        threads: {
+          "thread-1": {
+            customTitle: "Renamed",
+            draft: "Continue this",
+            contextItems: [asContextItem("C:\\notes\\one.md", "One")],
+            lastOpenedAt: "2026-03-24T08:00:00.000Z",
+            lastSubmittedPrompt: "Previous prompt"
+          },
+          "thread-2": "bad"
+        }
+      });
+
+      assert(store.lastOpenedThreadId === "thread-1", "expected last opened thread id to survive sanitization");
+      assert(store.threads["thread-1"]?.draft === "Continue this", "expected valid thread draft to survive");
+      assert(store.threads["thread-1"]?.contextItems.length === 1, "expected valid context items to survive");
+      assert(store.threads["thread-2"]?.draft === "", "expected malformed thread state to reset");
+      assert(
+        getCodexThreadLocalStoreKey("C:\\workspace") === "codex.threadHistory.C:\\workspace",
+        "expected workspace-scoped local-storage key"
+      );
+    }
+  },
+  {
+    name: "extractCodexThreadDetails hydrates full conversation entries from thread turns",
+    run() {
+      const details = extractCodexThreadDetails({
+        id: "thread-1",
+        name: null,
+        updatedAt: "2026-03-24T09:30:00.000Z",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "msg-user-1",
+                type: "userMessage",
+                role: "user",
+                content: [{ type: "text", text: "Summarize this transcript." }]
+              },
+              {
+                id: "msg-agent-1",
+                type: "agentMessage",
+                text: "Here is the summary."
+              }
+            ]
+          }
+        ]
+      });
+
+      assert(details?.id === "thread-1", "expected thread details to be created");
+      assert(details?.preview === "Summarize this transcript.", "expected preview from first real user message");
+      assert(details?.conversationEntries.length === 2, "expected both user and agent entries to hydrate");
+      assert(details?.conversationEntries[0]?.kind === "user_message", "expected first hydrated entry to be the user message");
+    }
+  },
+  {
+    name: "sortCodexThreads prefers recently opened local chats before updated timestamps",
+    run() {
+      const sorted = sortCodexThreads(
+        [
+          {
+            id: "thread-older",
+            name: "Older",
+            preview: null,
+            createdAt: null,
+            updatedAt: "2026-03-24T09:00:00.000Z",
+            status: "idle",
+            archived: false
+          },
+          {
+            id: "thread-recent",
+            name: "Recent",
+            preview: null,
+            createdAt: null,
+            updatedAt: "2026-03-24T10:00:00.000Z",
+            status: "idle",
+            archived: false
+          }
+        ],
+        {
+          lastOpenedThreadId: "thread-older",
+          threads: {
+            "thread-older": {
+              ...createInitialCodexThreadLocalState(),
+              lastOpenedAt: "2026-03-24T11:00:00.000Z"
+            }
+          }
+        }
+      );
+
+      assert(sorted[0]?.id === "thread-older", "expected locally reopened thread to sort first");
     }
   }
 ];
