@@ -143,6 +143,7 @@ export function CodexWorkbench({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
   const [requestAnswers, setRequestAnswers] = useState<Record<string, string[]>>({});
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -191,13 +192,13 @@ export function CodexWorkbench({
     };
   }, [conversationEntries]);
 
-  const latestUserPrompt = useMemo(() => {
-    const latestEntry = [...conversationEntries]
-      .reverse()
-      .find((entry) => entry.kind === "user_message" && entry.text.trim().length > 0);
+  const primaryUserPrompt = useMemo(() => {
+    const firstEntry = conversationEntries.find(
+      (entry) => entry.kind === "user_message" && entry.text.trim().length > 0
+    );
 
-    if (latestEntry) {
-      return truncateSingleLineText(latestEntry.text);
+    if (firstEntry) {
+      return truncateSingleLineText(firstEntry.text);
     }
 
     if (lastSubmittedPrompt) {
@@ -211,13 +212,17 @@ export function CodexWorkbench({
   const dockFeedEntries = useMemo(() => conversationEntries, [conversationEntries]);
 
   const hasDockConversation = Boolean(
-    latestUserPrompt
+    primaryUserPrompt
       || dockFeedEntries.length
       || pendingSendId
       || session.activeTurnId
       || pendingUserInputRequest
       || session.activeThreadId
   );
+  const showDockWaitingPlaceholder = hasDockConversation
+    && !primaryUserPrompt
+    && dockFeedEntries.length === 0
+    && !pendingUserInputRequest;
 
   const renderPendingUserInputRequest = () => {
     if (!pendingUserInputRequest) {
@@ -447,10 +452,10 @@ export function CodexWorkbench({
   if (variant === "dock") {
     return (
       <section className="codex-workbench codex-workbench-dock codex-workbench-cursor">
-        <div className="codex-cursor-sticky-top">
+        <div className={`codex-cursor-sticky-top${showDockWaitingPlaceholder ? " codex-cursor-sticky-top-waiting" : ""}`}>
           <header className="codex-cursor-toolbar">
-            <div className="codex-cursor-toolbar-title" title={latestUserPrompt || "New Chat"}>
-              {latestUserPrompt || "New Chat"}
+            <div className="codex-cursor-toolbar-title" title={primaryUserPrompt || "New Chat"}>
+              {primaryUserPrompt || "New Chat"}
             </div>
             <div className="codex-cursor-toolbar-actions">
               <button
@@ -477,23 +482,36 @@ export function CodexWorkbench({
               >
                 {canStop ? "o" : ">"}
               </button>
+              <button
+                type="button"
+                className="codex-cursor-toolbar-button"
+                onClick={() => setStatusMenuOpen((current) => !current)}
+                title="Codex status"
+              >
+                ...
+              </button>
             </div>
           </header>
 
+          {statusMenuOpen ? (
+            <div className="codex-cursor-toolbar-menu">
+              <span className={`codex-terminal-status ${getStatusTone(session.status)}`}>
+                {session.status.toUpperCase()}
+              </span>
+              <span className="codex-cursor-toolbar-menu-message">{session.message}</span>
+            </div>
+          ) : null}
+
           {hasDockConversation ? (
-            <div className="codex-cursor-question-pill" title={latestUserPrompt}>
-              {latestUserPrompt || "Waiting for Codex..."}
+            <div
+              className={`codex-cursor-question-pill${primaryUserPrompt ? "" : " codex-cursor-question-pill-placeholder"}`}
+              title={primaryUserPrompt}
+            >
+              {primaryUserPrompt || "Waiting for Codex..."}
             </div>
           ) : (
             renderComposer("expanded")
           )}
-
-          <div className="codex-cursor-status-strip">
-            <span className={`codex-terminal-status ${getStatusTone(session.status)}`}>
-              {session.status.toUpperCase()}
-            </span>
-            <span className="codex-terminal-message">{session.message}</span>
-          </div>
         </div>
 
         <div className="codex-cursor-feed-shell">
