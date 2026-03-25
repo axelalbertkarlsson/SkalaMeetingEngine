@@ -25,6 +25,7 @@ import {
 import {
   createInitialCodexThreadLocalState,
   extractCodexThreadDetails,
+  getCodexConversationEntriesFromTurn,
   getCodexThreadLocalStoreKey,
   resolveCodexThreadTitle,
   sanitizeCodexThreadLocalStore,
@@ -339,6 +340,14 @@ export const tests: TerminalHelperTestCase[] = [
         text === "Use the transcript.\nC:\\notes\\transcript.md",
         `unexpected extracted user message text: ${JSON.stringify(text)}`
       );
+
+      const inputText = extractTextFromUserMessageContent([
+        { type: "input_text", text: { value: "Follow-up question" } }
+      ]);
+      assert(
+        inputText === "Follow-up question",
+        `unexpected input_text extraction: ${JSON.stringify(inputText)}`
+      );
     }
   },
   {
@@ -480,6 +489,28 @@ export const tests: TerminalHelperTestCase[] = [
       assert(details?.preview === "Summarize this transcript.", "expected preview from first real user message");
       assert(details?.conversationEntries.length === 2, "expected both user and agent entries to hydrate");
       assert(details?.conversationEntries[0]?.kind === "user_message", "expected first hydrated entry to be the user message");
+    }
+  },
+  {
+    name: "getCodexConversationEntriesFromTurn hydrates the initial turn/start response",
+    run() {
+      const entries = getCodexConversationEntriesFromTurn({
+        id: "turn-2",
+        items: [
+          {
+            id: "msg-user-2",
+            type: "userMessage",
+            text: "How do I run this from PowerShell?"
+          }
+        ]
+      });
+
+      assert(entries.length === 1, "expected the initial turn response to hydrate one entry");
+      assert(entries[0]?.kind === "user_message", "expected the turn entry to be treated as a user message");
+      assert(
+        entries[0]?.text === "How do I run this from PowerShell?",
+        `unexpected hydrated user text: ${JSON.stringify(entries[0]?.text)}`
+      );
     }
   },
   {

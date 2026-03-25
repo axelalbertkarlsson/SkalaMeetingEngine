@@ -208,10 +208,7 @@ export function CodexWorkbench({
     return activeThread?.name ?? "";
   }, [conversationEntries, lastSubmittedPrompt, session.activeThreadId, threads]);
 
-  const dockFeedEntries = useMemo(
-    () => conversationEntries.filter((entry) => entry.kind !== "user_message"),
-    [conversationEntries]
-  );
+  const dockFeedEntries = useMemo(() => conversationEntries, [conversationEntries]);
 
   const hasDockConversation = Boolean(
     latestUserPrompt

@@ -16,6 +16,7 @@ interface CodexAppConnectWireResponse {
 
 interface CodexAppSendTurnWireResponse {
   turn_id: string;
+  turn?: unknown | null;
 }
 
 interface CodexAppListThreadsWireResponse {
@@ -127,7 +128,8 @@ export async function sendCodexTurn(request: {
   });
 
   return {
-    turnId: response.turn_id
+    turnId: response.turn_id,
+    turn: response.turn ?? null
   } satisfies CodexAppSendTurnResponse;
 }
 

@@ -240,6 +240,7 @@ pub struct CodexAppSendTurnRequest {
 #[serde(rename_all = "snake_case")]
 pub struct CodexAppSendTurnResponse {
     pub turn_id: String,
+    pub turn: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,6 +493,16 @@ fn extract_turn_id_from_value(value: &Value) -> Option<String> {
     value.pointer("/turn/id")
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn extract_turn_from_send_result(value: &Value) -> Option<Value> {
+    value.get("turn").cloned().or_else(|| {
+        if value.get("id").and_then(Value::as_str).is_some() {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn build_thread_start_params(workspace_path: &str) -> Value {
@@ -938,6 +949,7 @@ pub fn codex_app_send_turn(
         )?
     };
 
+    let turn = extract_turn_from_send_result(&result);
     let turn_id = result
         .pointer("/turn/id")
         .and_then(Value::as_str)
@@ -947,7 +959,7 @@ pub fn codex_app_send_turn(
 
     connection.set_active_turn_id(Some(turn_id.clone()));
 
-    Ok(CodexAppSendTurnResponse { turn_id })
+    Ok(CodexAppSendTurnResponse { turn_id, turn })
 }
 
 #[tauri::command]

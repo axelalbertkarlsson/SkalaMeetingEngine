@@ -107,4 +107,5 @@ export interface CodexAppConnectResponse {
 
 export interface CodexAppSendTurnResponse {
   turnId: string;
+  turn?: unknown | null;
 }

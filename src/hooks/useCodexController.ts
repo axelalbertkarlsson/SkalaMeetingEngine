@@ -26,6 +26,7 @@ import {
   EMPTY_CODEX_THREAD_LOCAL_STORE,
   extractCodexThreadDetails,
   extractCodexThreadSummary,
+  getCodexConversationEntriesFromTurn,
   getCodexThreadLocalStoreKey,
   resolveCodexThreadTitle,
   sanitizeCodexThreadLocalStore,
@@ -211,6 +212,22 @@ export function useCodexController({
 
   const appendConversationEntry = useCallback((entry: CodexConversationEntry) => {
     setConversationEntries((current) => limitConversationEntries([...current, entry]));
+  }, []);
+
+  const upsertConversationEntries = useCallback((entries: CodexConversationEntry[]) => {
+    if (!entries.length) {
+      return;
+    }
+
+    setConversationEntries((current) => {
+      let nextEntries = current;
+
+      entries.forEach((entry) => {
+        nextEntries = upsertConversationEntry(nextEntries, entry);
+      });
+
+      return limitConversationEntries(nextEntries);
+    });
   }, []);
 
   const requestComposerFocus = useCallback(() => {
@@ -505,20 +522,48 @@ export function useCodexController({
   const dispatchSend = useCallback(
     async (send: CodexQueuedSend, connectionId: string, expectedTurnId?: string | null) => {
       try {
-        await sendCodexTurn({
+        const response = await sendCodexTurn({
           connectionId,
           prompt: send.prompt,
           expectedTurnId
         });
-        return true;
+        const turnEntries = response.turn ? getCodexConversationEntriesFromTurn(response.turn) : [];
+        const hasUserEntry = turnEntries.some((entry) => entry.kind === "user_message");
+
+        if (turnEntries.length) {
+          upsertConversationEntries(turnEntries);
+        }
+
+        if (!hasUserEntry) {
+          upsertConversationEntries([
+            {
+              id: `conversation-pending-${send.id}`,
+              kind: "user_message",
+              title: "You",
+              text: send.draft.trim() || send.contextItems[0]?.label || "Context turn",
+              turnId: response.turnId,
+              status: null,
+              meta: null,
+              phase: null
+            }
+          ]);
+        }
+
+        return {
+          ok: true,
+          turnId: response.turnId
+        };
       } catch (error) {
         appendConversationEntry(
           createCodexEventEntry("Codex send error", `Failed to send prompt: ${String(error)}`)
         );
-        return false;
+        return {
+          ok: false,
+          turnId: null
+        };
       }
     },
-    [appendConversationEntry]
+    [appendConversationEntry, upsertConversationEntries]
   );
 
   const sendDraft = useCallback(() => {
@@ -559,9 +604,9 @@ export function useCodexController({
         }
       }
 
-      const sent = await dispatchSend(send, connectionId, sessionRef.current.activeTurnId);
+      const sendResult = await dispatchSend(send, connectionId, sessionRef.current.activeTurnId);
       setPendingSend(null);
-      if (!sent || !activeThreadId) {
+      if (!sendResult.ok || !activeThreadId) {
         return;
       }
 

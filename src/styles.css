@@ -1583,6 +1583,7 @@ table {
 .codex-workbench-dock {
   padding: 0;
   min-width: 0;
+  height: auto;
   min-height: 100%;
 }
 
@@ -2112,15 +2113,16 @@ table {
   background: transparent;
 }
 
-.codex-workbench-cursor .codex-feed-entry-user {
-  display: none;
-}
-
 .codex-workbench-cursor .codex-feed-entry-agent,
 .codex-workbench-cursor .codex-feed-entry-event,
 .codex-workbench-cursor .codex-feed-entry-command,
 .codex-workbench-cursor .codex-feed-entry-file-change {
   padding: 0 2px 14px;
+  border: 0;
+}
+
+.codex-workbench-cursor .codex-feed-entry-user {
+  padding: 0 2px 12px;
   border: 0;
 }
 
@@ -2162,6 +2164,11 @@ table {
   color: var(--text-muted);
 }
 
+.codex-workbench-cursor .codex-feed-entry-user .codex-feed-entry-header,
+.codex-workbench-cursor .codex-feed-entry-user .codex-feed-entry-meta {
+  display: none;
+}
+
 .codex-feed-entry-meta {
   margin: 0;
   color: var(--text-muted);
@@ -2186,6 +2193,19 @@ table {
   font-family: "Switzer", "IBM Plex Sans", system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.55;
+}
+
+.codex-workbench-cursor .codex-feed-entry-user .codex-feed-entry-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--panel-bg-secondary);
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .codex-user-input-request {

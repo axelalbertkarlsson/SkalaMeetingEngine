@@ -106,6 +106,10 @@ export function clearComposerAfterSuccessfulSend(): CodexComposerState {
 }
 
 export function extractTextFromUserMessageContent(content: unknown) {
+  if (typeof content === "string") {
+    return content;
+  }
+
   if (!Array.isArray(content)) {
     return "";
   }
@@ -116,10 +120,22 @@ export function extractTextFromUserMessageContent(content: unknown) {
         return "";
       }
 
-      if ("type" in part && (part as { type?: string }).type === "text") {
-        return typeof (part as { text?: unknown }).text === "string"
-          ? (part as { text: string }).text
-          : "";
+      if ("type" in part) {
+        const type = (part as { type?: string }).type;
+        if (type === "text" || type === "input_text") {
+          const textValue = (part as { text?: unknown }).text;
+          if (typeof textValue === "string") {
+            return textValue;
+          }
+
+          if (
+            textValue
+            && typeof textValue === "object"
+            && typeof (textValue as { value?: unknown }).value === "string"
+          ) {
+            return (textValue as { value: string }).value;
+          }
+        }
       }
 
       if ("path" in part && typeof (part as { path?: unknown }).path === "string") {
@@ -228,6 +244,9 @@ export function createCodexConversationEntryFromItem(
   }
 
   if (type === "userMessage") {
+    const text =
+      extractTextFromUserMessageContent(record.content)
+      || (typeof record.text === "string" ? record.text : "");
     return {
       id: `conversation-${itemId}`,
       itemId,
@@ -235,7 +254,7 @@ export function createCodexConversationEntryFromItem(
       meta: null,
       phase: null,
       status: null,
-      text: extractTextFromUserMessageContent(record.content),
+      text,
       title: "You",
       turnId
     };
@@ -447,6 +466,27 @@ export function upsertConversationEntry(
 ) {
   const existingIndex = entries.findIndex((entry) => entry.itemId === nextEntry.itemId);
   if (existingIndex === -1) {
+    if (nextEntry.kind === "user_message" && nextEntry.turnId) {
+      const optimisticIndex = entries.findIndex(
+        (entry) =>
+          entry.kind === "user_message"
+          && !entry.itemId
+          && entry.turnId === nextEntry.turnId
+      );
+
+      if (optimisticIndex !== -1) {
+        return entries.map((entry, index) =>
+          index === optimisticIndex
+            ? {
+                ...entry,
+                ...nextEntry,
+                text: entry.text || nextEntry.text
+              }
+            : entry
+        );
+      }
+    }
+
     return [...entries, nextEntry];
   }
 

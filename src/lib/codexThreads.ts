@@ -115,6 +115,24 @@ function asItemsFromTurn(turn: unknown) {
   return [];
 }
 
+export function getCodexConversationEntriesFromTurn(rawTurn: unknown) {
+  const turnRecord = asRecord(rawTurn);
+  const turnId = asString(turnRecord?.id) ?? "";
+  const entries: CodexConversationEntry[] = [];
+
+  asItemsFromTurn(rawTurn).forEach((item) => {
+    const entry = createCodexConversationEntryFromItem(item, turnId);
+    if (!entry) {
+      return;
+    }
+
+    const nextEntries = upsertConversationEntry(entries, entry);
+    entries.splice(0, entries.length, ...nextEntries);
+  });
+
+  return entries;
+}
+
 function getTurnsFromThread(rawThread: unknown) {
   const thread = asRecord(rawThread);
   if (!thread) {
@@ -138,16 +156,10 @@ export function getCodexConversationEntriesFromThread(rawThread: unknown) {
   const entries: CodexConversationEntry[] = [];
 
   turns.forEach((turn) => {
-    const turnRecord = asRecord(turn);
-    const turnId = asString(turnRecord?.id) ?? "";
-    asItemsFromTurn(turn).forEach((item) => {
-      const entry = createCodexConversationEntryFromItem(item, turnId);
-      if (!entry) {
-        return;
-      }
-
-      const nextEntries = upsertConversationEntry(entries, entry);
-      entries.splice(0, entries.length, ...nextEntries);
+    const nextEntries = getCodexConversationEntriesFromTurn(turn);
+    nextEntries.forEach((entry) => {
+      const mergedEntries = upsertConversationEntry(entries, entry);
+      entries.splice(0, entries.length, ...mergedEntries);
     });
   });
 
