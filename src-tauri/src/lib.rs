@@ -36,6 +36,8 @@ pub fn run() {
             commands::codex::resize_codex_terminal,
             commands::codex_app::codex_app_connect,
             commands::codex_app::codex_app_list_threads,
+            commands::codex_app::codex_app_list_models,
+            commands::codex_app::codex_app_read_config,
             commands::codex_app::codex_app_read_thread,
             commands::codex_app::codex_app_resume_thread,
             commands::codex_app::codex_app_start_thread,

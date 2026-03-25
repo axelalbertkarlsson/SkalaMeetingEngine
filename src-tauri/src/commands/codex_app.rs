@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -210,6 +210,31 @@ pub struct CodexAppListThreadsResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct CodexAppListModelsRequest {
+    pub connection_id: String,
+    pub include_hidden: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppListModelsResponse {
+    pub models: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppReadConfigRequest {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppReadConfigResponse {
+    pub config: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct CodexAppThreadRequest {
     pub connection_id: String,
     pub thread_id: String,
@@ -226,6 +251,15 @@ pub struct CodexAppThreadResponse {
 pub struct CodexAppStartThreadRequest {
     pub connection_id: String,
     pub workspace_path: String,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodexAppResumeThreadRequest {
+    pub connection_id: String,
+    pub thread_id: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,12 +268,15 @@ pub struct CodexAppSendTurnRequest {
     pub connection_id: String,
     pub prompt: String,
     pub expected_turn_id: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodexAppSendTurnResponse {
     pub turn_id: String,
+    pub turn: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -494,14 +531,44 @@ fn extract_turn_id_from_value(value: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn build_thread_start_params(workspace_path: &str) -> Value {
-    json!({
-        "approvalPolicy": "never",
-        "cwd": workspace_path,
-        "personality": "pragmatic",
-        "sandbox": "workspace-write",
-        "serviceName": "skala_meeting_engine",
+fn extract_turn_from_send_result(value: &Value) -> Option<Value> {
+    value.get("turn").cloned().or_else(|| {
+        if value.get("id").and_then(Value::as_str).is_some() {
+            Some(value.clone())
+        } else {
+            None
+        }
     })
+}
+
+fn normalized_non_empty_option(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
+}
+
+fn build_thread_start_params(workspace_path: &str, model: Option<&str>) -> Value {
+    let mut params = Map::new();
+    params.insert("approvalPolicy".to_string(), json!("never"));
+    params.insert("cwd".to_string(), json!(workspace_path));
+    params.insert("personality".to_string(), json!("pragmatic"));
+    params.insert("sandbox".to_string(), json!("workspace-write"));
+    params.insert("serviceName".to_string(), json!("skala_meeting_engine"));
+
+    if let Some(model) = normalized_non_empty_option(model) {
+        params.insert("model".to_string(), json!(model));
+    }
+
+    Value::Object(params)
+}
+
+fn build_thread_resume_params(thread_id: &str, model: Option<&str>) -> Value {
+    let mut params = Map::new();
+    params.insert("id".to_string(), json!(thread_id));
+
+    if let Some(model) = normalized_non_empty_option(model) {
+        params.insert("model".to_string(), json!(model));
+    }
+
+    Value::Object(params)
 }
 
 fn handle_server_message(
@@ -791,6 +858,62 @@ pub fn codex_app_list_threads(
 }
 
 #[tauri::command]
+pub fn codex_app_list_models(
+    state: State<CodexAppServerState>,
+    request: CodexAppListModelsRequest,
+) -> Result<CodexAppListModelsResponse, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    let include_hidden = request.include_hidden.unwrap_or(false);
+    let mut models = Vec::new();
+    let mut next_cursor: Option<Value> = None;
+
+    loop {
+        let mut params = Map::new();
+        params.insert("limit".to_string(), json!(100));
+        params.insert("includeHidden".to_string(), json!(include_hidden));
+
+        if let Some(cursor) = next_cursor.take() {
+            params.insert("cursor".to_string(), cursor);
+        }
+
+        let result = connection.send_request("model/list", Value::Object(params))?;
+
+        let mut page_models = result
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| result.get("models").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        models.append(&mut page_models);
+
+        next_cursor = result.get("nextCursor").cloned().filter(|cursor| !cursor.is_null());
+        if next_cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(CodexAppListModelsResponse { models })
+}
+
+#[tauri::command]
+pub fn codex_app_read_config(
+    state: State<CodexAppServerState>,
+    request: CodexAppReadConfigRequest,
+) -> Result<CodexAppReadConfigResponse, String> {
+    let connection = state
+        .get(&request.connection_id)?
+        .ok_or_else(|| "Codex app-server connection not found.".to_string())?;
+
+    let result = connection.send_request("config/read", json!({}))?;
+    let config = result.get("config").cloned().unwrap_or(result);
+
+    Ok(CodexAppReadConfigResponse { config })
+}
+
+#[tauri::command]
 pub fn codex_app_read_thread(
     state: State<CodexAppServerState>,
     request: CodexAppThreadRequest,
@@ -818,7 +941,7 @@ pub fn codex_app_read_thread(
 #[tauri::command]
 pub fn codex_app_resume_thread(
     state: State<CodexAppServerState>,
-    request: CodexAppThreadRequest,
+    request: CodexAppResumeThreadRequest,
 ) -> Result<CodexAppThreadResponse, String> {
     let connection = state
         .get(&request.connection_id)?
@@ -826,9 +949,7 @@ pub fn codex_app_resume_thread(
 
     let result = connection.send_request(
         "thread/resume",
-        json!({
-            "id": request.thread_id,
-        }),
+        build_thread_resume_params(&request.thread_id, request.model.as_deref()),
     )?;
 
     let thread = result
@@ -854,7 +975,7 @@ pub fn codex_app_start_thread(
 
     let result = connection.send_request(
         "thread/start",
-        build_thread_start_params(&request.workspace_path),
+        build_thread_start_params(&request.workspace_path, request.model.as_deref()),
     )?;
 
     let thread = result
@@ -925,19 +1046,34 @@ pub fn codex_app_send_turn(
     } else {
         connection.send_request(
             "turn/start",
-            json!({
-                "approvalPolicy": "never",
-                "input": [
-                    {
-                        "type": "text",
-                        "text": request.prompt,
-                    }
-                ],
-                "threadId": thread_id,
-            }),
+            {
+                let mut params = Map::new();
+                params.insert("approvalPolicy".to_string(), json!("never"));
+                params.insert(
+                    "input".to_string(),
+                    json!([
+                        {
+                            "type": "text",
+                            "text": request.prompt,
+                        }
+                    ]),
+                );
+                params.insert("threadId".to_string(), json!(thread_id));
+
+                if let Some(model) = normalized_non_empty_option(request.model.as_deref()) {
+                    params.insert("model".to_string(), json!(model));
+                }
+
+                if let Some(effort) = normalized_non_empty_option(request.effort.as_deref()) {
+                    params.insert("effort".to_string(), json!(effort));
+                }
+
+                Value::Object(params)
+            },
         )?
     };
 
+    let turn = extract_turn_from_send_result(&result);
     let turn_id = result
         .pointer("/turn/id")
         .and_then(Value::as_str)
@@ -947,7 +1083,7 @@ pub fn codex_app_send_turn(
 
     connection.set_active_turn_id(Some(turn_id.clone()));
 
-    Ok(CodexAppSendTurnResponse { turn_id })
+    Ok(CodexAppSendTurnResponse { turn_id, turn })
 }
 
 #[tauri::command]

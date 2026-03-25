@@ -13,7 +13,9 @@ import {
 import {
   archiveCodexThread,
   connectCodexAppServer,
+  listCodexModels,
   listCodexThreads,
+  readCodexConfig,
   readCodexThread,
   respondToCodexServerRequest,
   resumeCodexThread,
@@ -21,11 +23,13 @@ import {
   startCodexThread,
   stopCodexAppServer
 } from "../lib/codexApi.js";
+import { formatCodexModelLabel } from "../lib/codexModelOptions.js";
 import {
   createInitialCodexThreadLocalState,
   EMPTY_CODEX_THREAD_LOCAL_STORE,
   extractCodexThreadDetails,
   extractCodexThreadSummary,
+  getCodexConversationEntriesFromTurn,
   getCodexThreadLocalStoreKey,
   resolveCodexThreadTitle,
   sanitizeCodexThreadLocalStore,
@@ -35,6 +39,9 @@ import type {
   CodexAppEventPayload,
   CodexContextItem,
   CodexConversationEntry,
+  CodexEffectiveConfig,
+  CodexModelOption,
+  CodexReasoningEffort,
   CodexSessionState,
   CodexThreadLocalState,
   CodexThreadLocalStore,
@@ -68,6 +75,8 @@ interface UseCodexControllerOptions {
   workspaceRoot: string;
   commandPath: string;
   captureDebugBundle: boolean;
+  selectedModel: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
 }
 
 function isTauriRuntime() {
@@ -125,14 +134,122 @@ function extractThreadId(payload: unknown) {
   return null;
 }
 
+const reasoningEffortSet = new Set<CodexReasoningEffort>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh"
+]);
+
+function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return typeof value === "string" && reasoningEffortSet.has(value as CodexReasoningEffort);
+}
+
+const EMPTY_CODEX_EFFECTIVE_CONFIG: CodexEffectiveConfig = {
+  model: null,
+  reasoningEffort: null
+};
+
+function extractCodexModelOption(rawModel: unknown): CodexModelOption | null {
+  if (!rawModel || typeof rawModel !== "object") {
+    return null;
+  }
+
+  const record = rawModel as Record<string, unknown>;
+  const id =
+    typeof record.id === "string"
+      ? record.id
+      : typeof record.model === "string"
+        ? record.model
+        : null;
+  if (!id) {
+    return null;
+  }
+
+  const supportedReasoningEfforts = Array.isArray(record.supportedReasoningEfforts)
+    ? record.supportedReasoningEfforts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return [];
+        }
+
+        const option = entry as Record<string, unknown>;
+        if (!isCodexReasoningEffort(option.reasoningEffort)) {
+          return [];
+        }
+
+        return [
+          {
+            reasoningEffort: option.reasoningEffort,
+            description: typeof option.description === "string" ? option.description : null
+          }
+        ];
+      })
+    : [];
+
+  return {
+    id,
+    displayName: formatCodexModelLabel(
+      typeof record.displayName === "string" ? record.displayName : id
+    ),
+    defaultReasoningEffort: isCodexReasoningEffort(record.defaultReasoningEffort)
+      ? record.defaultReasoningEffort
+      : null,
+    supportedReasoningEfforts,
+    inputModalities: Array.isArray(record.inputModalities)
+      ? record.inputModalities.filter((value): value is string => typeof value === "string")
+      : [],
+    supportsPersonality: Boolean(record.supportsPersonality),
+    isDefault: Boolean(record.isDefault),
+    hidden: Boolean(record.hidden)
+  };
+}
+
+function sortCodexModelOptions(models: CodexModelOption[]) {
+  return [...models].sort((left, right) => {
+    if (left.isDefault !== right.isDefault) {
+      return left.isDefault ? -1 : 1;
+    }
+
+    return left.displayName.localeCompare(right.displayName, undefined, {
+      sensitivity: "base"
+    });
+  });
+}
+
+function extractCodexEffectiveConfig(rawConfig: unknown): CodexEffectiveConfig {
+  if (!rawConfig || typeof rawConfig !== "object") {
+    return EMPTY_CODEX_EFFECTIVE_CONFIG;
+  }
+
+  const record = rawConfig as Record<string, unknown>;
+  const model = typeof record.model === "string" && record.model.trim().length > 0
+    ? record.model.trim()
+    : null;
+
+  return {
+    model,
+    reasoningEffort: isCodexReasoningEffort(record.model_reasoning_effort)
+      ? record.model_reasoning_effort
+      : null
+  };
+}
+
 export function useCodexController({
   workspaceRoot,
   commandPath,
-  captureDebugBundle: _captureDebugBundle
+  captureDebugBundle: _captureDebugBundle,
+  selectedModel,
+  reasoningEffort
 }: UseCodexControllerOptions) {
   const [session, setSession] = useState<CodexSessionState>(createInitialSessionState);
   const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
+  const [availableModels, setAvailableModels] = useState<CodexModelOption[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [effectiveConfig, setEffectiveConfig] = useState<CodexEffectiveConfig>(
+    EMPTY_CODEX_EFFECTIVE_CONFIG
+  );
   const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
   const [conversationEntries, setConversationEntries] = useState<CodexConversationEntry[]>([]);
   const [highlightedContextItemId, setHighlightedContextItemId] = useState<string | null>(null);
@@ -211,6 +328,22 @@ export function useCodexController({
 
   const appendConversationEntry = useCallback((entry: CodexConversationEntry) => {
     setConversationEntries((current) => limitConversationEntries([...current, entry]));
+  }, []);
+
+  const upsertConversationEntries = useCallback((entries: CodexConversationEntry[]) => {
+    if (!entries.length) {
+      return;
+    }
+
+    setConversationEntries((current) => {
+      let nextEntries = current;
+
+      entries.forEach((entry) => {
+        nextEntries = upsertConversationEntry(nextEntries, entry);
+      });
+
+      return limitConversationEntries(nextEntries);
+    });
   }, []);
 
   const requestComposerFocus = useCallback(() => {
@@ -295,6 +428,70 @@ export function useCodexController({
     [appendConversationEntry, threadLocalStore, workspaceRoot]
   );
 
+  const refreshAvailableModels = useCallback(
+    async (connectionId = sessionRef.current.connectionId) => {
+      if (!connectionId) {
+        setAvailableModels([]);
+        return [];
+      }
+
+      setModelsLoading(true);
+
+      try {
+        const rawModels = await listCodexModels({
+          connectionId,
+          includeHidden: true
+        });
+        const nextModels = sortCodexModelOptions(
+          rawModels
+            .map((rawModel) => extractCodexModelOption(rawModel))
+            .filter((model): model is CodexModelOption => model !== null)
+        );
+        setAvailableModels(nextModels);
+        return nextModels;
+      } catch (error) {
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex model error",
+            `Failed to load available Codex models: ${String(error)}`
+          )
+        );
+        return [];
+      } finally {
+        setModelsLoading(false);
+      }
+    },
+    [appendConversationEntry]
+  );
+
+  const refreshEffectiveConfig = useCallback(
+    async (connectionId = sessionRef.current.connectionId) => {
+      if (!connectionId) {
+        setEffectiveConfig(EMPTY_CODEX_EFFECTIVE_CONFIG);
+        return EMPTY_CODEX_EFFECTIVE_CONFIG;
+      }
+
+      try {
+        const rawConfig = await readCodexConfig({
+          connectionId
+        });
+        const nextConfig = extractCodexEffectiveConfig(rawConfig);
+        setEffectiveConfig(nextConfig);
+        return nextConfig;
+      } catch (error) {
+        setEffectiveConfig(EMPTY_CODEX_EFFECTIVE_CONFIG);
+        appendConversationEntry(
+          createCodexEventEntry(
+            "Codex config error",
+            `Failed to read effective Codex config: ${String(error)}`
+          )
+        );
+        return EMPTY_CODEX_EFFECTIVE_CONFIG;
+      }
+    },
+    [appendConversationEntry]
+  );
+
   const activateThreadFromRaw = useCallback(
     (rawThread: unknown) => {
       const details = extractCodexThreadDetails(rawThread);
@@ -340,7 +537,8 @@ export function useCodexController({
         });
         await resumeCodexThread({
           connectionId,
-          threadId
+          threadId,
+          model: selectedModel
         });
         activateThreadFromRaw(rawThread);
         if (options?.focusComposer !== false) {
@@ -357,7 +555,7 @@ export function useCodexController({
         return false;
       }
     },
-    [activateThreadFromRaw, appendConversationEntry, requestComposerFocus]
+    [activateThreadFromRaw, appendConversationEntry, requestComposerFocus, selectedModel]
   );
 
   const startSession = useCallback(
@@ -407,7 +605,11 @@ export function useCodexController({
             lastEventMethod: null
           }));
 
-          const nextThreads = await refreshThreads(response.connectionId);
+          const [nextThreads] = await Promise.all([
+            refreshThreads(response.connectionId),
+            refreshAvailableModels(response.connectionId),
+            refreshEffectiveConfig(response.connectionId)
+          ]);
           const preferredThreadId =
             sessionRef.current.activeThreadId
             ?? (reason === "manual" ? threadLocalStore.lastOpenedThreadId : null);
@@ -441,7 +643,16 @@ export function useCodexController({
       connectPromiseRef.current = promise;
       return promise;
     },
-    [appendConversationEntry, commandPath, refreshThreads, selectThread, threadLocalStore.lastOpenedThreadId, workspaceRoot]
+    [
+      appendConversationEntry,
+      commandPath,
+      refreshAvailableModels,
+      refreshEffectiveConfig,
+      refreshThreads,
+      selectThread,
+      threadLocalStore.lastOpenedThreadId,
+      workspaceRoot
+    ]
   );
 
   const stopSession = useCallback(() => {
@@ -487,7 +698,8 @@ export function useCodexController({
       try {
         const rawThread = await startCodexThread({
           connectionId,
-          workspacePath: workspaceRoot
+          workspacePath: workspaceRoot,
+          model: selectedModel
         });
         activateThreadFromRaw(rawThread);
         await refreshThreads(connectionId);
@@ -500,25 +712,63 @@ export function useCodexController({
         );
       }
     })();
-  }, [activateThreadFromRaw, appendConversationEntry, refreshThreads, requestComposerFocus, startSession, workspaceRoot]);
+  }, [
+    activateThreadFromRaw,
+    appendConversationEntry,
+    refreshThreads,
+    requestComposerFocus,
+    selectedModel,
+    startSession,
+    workspaceRoot
+  ]);
 
   const dispatchSend = useCallback(
     async (send: CodexQueuedSend, connectionId: string, expectedTurnId?: string | null) => {
       try {
-        await sendCodexTurn({
+        const response = await sendCodexTurn({
           connectionId,
           prompt: send.prompt,
-          expectedTurnId
+          expectedTurnId,
+          model: selectedModel,
+          effort: reasoningEffort
         });
-        return true;
+        const turnEntries = response.turn ? getCodexConversationEntriesFromTurn(response.turn) : [];
+        const hasUserEntry = turnEntries.some((entry) => entry.kind === "user_message");
+
+        if (turnEntries.length) {
+          upsertConversationEntries(turnEntries);
+        }
+
+        if (!hasUserEntry) {
+          upsertConversationEntries([
+            {
+              id: `conversation-pending-${send.id}`,
+              kind: "user_message",
+              title: "You",
+              text: send.draft.trim() || send.contextItems[0]?.label || "Context turn",
+              turnId: response.turnId,
+              status: null,
+              meta: null,
+              phase: null
+            }
+          ]);
+        }
+
+        return {
+          ok: true,
+          turnId: response.turnId
+        };
       } catch (error) {
         appendConversationEntry(
           createCodexEventEntry("Codex send error", `Failed to send prompt: ${String(error)}`)
         );
-        return false;
+        return {
+          ok: false,
+          turnId: null
+        };
       }
     },
-    [appendConversationEntry]
+    [appendConversationEntry, reasoningEffort, selectedModel, upsertConversationEntries]
   );
 
   const sendDraft = useCallback(() => {
@@ -542,7 +792,8 @@ export function useCodexController({
         try {
           const rawThread = await startCodexThread({
             connectionId,
-            workspacePath: workspaceRoot
+            workspacePath: workspaceRoot,
+            model: selectedModel
           });
           const details = activateThreadFromRaw(rawThread);
           activeThreadId = details.id;
@@ -559,9 +810,9 @@ export function useCodexController({
         }
       }
 
-      const sent = await dispatchSend(send, connectionId, sessionRef.current.activeTurnId);
+      const sendResult = await dispatchSend(send, connectionId, sessionRef.current.activeTurnId);
       setPendingSend(null);
-      if (!sent || !activeThreadId) {
+      if (!sendResult.ok || !activeThreadId) {
         return;
       }
 
@@ -577,7 +828,18 @@ export function useCodexController({
       setHighlightedContextItemId(null);
       await refreshThreads(connectionId);
     })();
-  }, [activateThreadFromRaw, appendConversationEntry, contextItems, dispatchSend, draft, refreshThreads, startSession, upsertThreadLocalState, workspaceRoot]);
+  }, [
+    activateThreadFromRaw,
+    appendConversationEntry,
+    contextItems,
+    dispatchSend,
+    draft,
+    refreshThreads,
+    selectedModel,
+    startSession,
+    upsertThreadLocalState,
+    workspaceRoot
+  ]);
 
   const submitUserInputRequest = useCallback(
     async (answers: Record<string, string[]>) => {
@@ -933,6 +1195,9 @@ export function useCodexController({
     session,
     threads,
     threadsLoading,
+    availableModels,
+    effectiveConfig,
+    modelsLoading,
     historyPanelOpen,
     setHistoryPanelOpen,
     toggleHistoryPanel: () => setHistoryPanelOpen((current) => !current),
@@ -955,7 +1220,9 @@ export function useCodexController({
     startSession,
     stopSession,
     sendDraft,
+    refreshEffectiveConfig,
     submitUserInputRequest,
+    refreshAvailableModels,
     refreshThreads,
     selectThread,
     renameThread,

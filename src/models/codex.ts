@@ -105,6 +105,30 @@ export interface CodexAppConnectResponse {
   message: string;
 }
 
+export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface CodexModelReasoningEffortOption {
+  reasoningEffort: CodexReasoningEffort;
+  description: string | null;
+}
+
+export interface CodexModelOption {
+  id: string;
+  displayName: string;
+  defaultReasoningEffort: CodexReasoningEffort | null;
+  supportedReasoningEfforts: CodexModelReasoningEffortOption[];
+  inputModalities: string[];
+  supportsPersonality: boolean;
+  isDefault: boolean;
+  hidden: boolean;
+}
+
+export interface CodexEffectiveConfig {
+  model: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
+}
+
 export interface CodexAppSendTurnResponse {
   turnId: string;
+  turn?: unknown | null;
 }

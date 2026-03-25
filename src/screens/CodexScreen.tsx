@@ -3,6 +3,8 @@ import { CodexWorkbench } from "../components/shell/CodexWorkbench";
 import type {
   CodexContextItem,
   CodexConversationEntry,
+  CodexModelOption,
+  CodexReasoningEffort,
   CodexSessionState,
   CodexThreadSummary
 } from "../models/codex.js";
@@ -28,6 +30,11 @@ interface CodexScreenProps {
   session: CodexSessionState;
   threads: CodexThreadSummary[];
   threadsLoading: boolean;
+  availableModels: CodexModelOption[];
+  modelsLoading: boolean;
+  selectedModel: string | null;
+  effectiveModelId: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
   historyPanelOpen: boolean;
   draft: string;
   contextItems: CodexContextItem[];
@@ -51,6 +58,8 @@ interface CodexScreenProps {
   onSelectThread: (threadId: string) => void;
   onRenameThread: (threadId: string, title: string) => void;
   onArchiveThread: (threadId: string) => void;
+  onSelectedModelChange: (value: string | null) => void;
+  onReasoningEffortChange: (value: CodexReasoningEffort | null) => void;
 }
 
 export function CodexScreen({
@@ -58,6 +67,11 @@ export function CodexScreen({
   session,
   threads,
   threadsLoading,
+  availableModels,
+  modelsLoading,
+  selectedModel,
+  effectiveModelId,
+  reasoningEffort,
   historyPanelOpen,
   draft,
   contextItems,
@@ -80,7 +94,9 @@ export function CodexScreen({
   onToggleHistoryPanel,
   onSelectThread,
   onRenameThread,
-  onArchiveThread
+  onArchiveThread,
+  onSelectedModelChange,
+  onReasoningEffortChange
 }: CodexScreenProps) {
   return (
     <section className="workspace-screen codex-screen">
@@ -96,6 +112,11 @@ export function CodexScreen({
         session={session}
         threads={threads}
         threadsLoading={threadsLoading}
+        availableModels={availableModels}
+        modelsLoading={modelsLoading}
+        selectedModel={selectedModel}
+        effectiveModelId={effectiveModelId}
+        reasoningEffort={reasoningEffort}
         historyPanelOpen={historyPanelOpen}
         draft={draft}
         contextItems={contextItems}
@@ -119,6 +140,8 @@ export function CodexScreen({
         onSelectThread={onSelectThread}
         onRenameThread={onRenameThread}
         onArchiveThread={onArchiveThread}
+        onSelectedModelChange={onSelectedModelChange}
+        onReasoningEffortChange={onReasoningEffortChange}
       />
     </section>
   );

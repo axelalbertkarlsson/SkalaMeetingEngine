@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CodexEffectiveConfig,
+  CodexReasoningEffort,
   CodexAppConnectResponse,
   CodexAppSendTurnResponse
 } from "../models/codex.js";
@@ -16,6 +18,7 @@ interface CodexAppConnectWireResponse {
 
 interface CodexAppSendTurnWireResponse {
   turn_id: string;
+  turn?: unknown | null;
 }
 
 interface CodexAppListThreadsWireResponse {
@@ -24,6 +27,14 @@ interface CodexAppListThreadsWireResponse {
 
 interface CodexAppThreadWireResponse {
   thread: unknown;
+}
+
+interface CodexAppModelListWireResponse {
+  models: unknown[];
+}
+
+interface CodexAppConfigWireResponse {
+  config: unknown;
 }
 
 export async function connectCodexAppServer(request: {
@@ -74,11 +85,13 @@ export async function readCodexThread(request: {
 export async function resumeCodexThread(request: {
   connectionId: string;
   threadId: string;
+  model?: string | null;
 }) {
   const response = await invoke<CodexAppThreadWireResponse>("codex_app_resume_thread", {
     request: {
       connection_id: request.connectionId,
-      thread_id: request.threadId
+      thread_id: request.threadId,
+      model: request.model ?? null
     }
   });
 
@@ -88,15 +101,43 @@ export async function resumeCodexThread(request: {
 export async function startCodexThread(request: {
   connectionId: string;
   workspacePath: string;
+  model?: string | null;
 }) {
   const response = await invoke<CodexAppThreadWireResponse>("codex_app_start_thread", {
     request: {
       connection_id: request.connectionId,
-      workspace_path: request.workspacePath
+      workspace_path: request.workspacePath,
+      model: request.model ?? null
     }
   });
 
   return response.thread;
+}
+
+export async function listCodexModels(request: {
+  connectionId: string;
+  includeHidden?: boolean;
+}) {
+  const response = await invoke<CodexAppModelListWireResponse>("codex_app_list_models", {
+    request: {
+      connection_id: request.connectionId,
+      include_hidden: request.includeHidden ?? false
+    }
+  });
+
+  return response.models;
+}
+
+export async function readCodexConfig(request: {
+  connectionId: string;
+}) {
+  const response = await invoke<CodexAppConfigWireResponse>("codex_app_read_config", {
+    request: {
+      connection_id: request.connectionId
+    }
+  });
+
+  return response.config as CodexEffectiveConfig | Record<string, unknown> | null;
 }
 
 export async function archiveCodexThread(request: {
@@ -117,17 +158,22 @@ export async function sendCodexTurn(request: {
   connectionId: string;
   prompt: string;
   expectedTurnId?: string | null;
+  model?: string | null;
+  effort?: CodexReasoningEffort | null;
 }) {
   const response = await invoke<CodexAppSendTurnWireResponse>("codex_app_send_turn", {
     request: {
       connection_id: request.connectionId,
       prompt: request.prompt,
-      expected_turn_id: request.expectedTurnId ?? null
+      expected_turn_id: request.expectedTurnId ?? null,
+      model: request.model ?? null,
+      effort: request.effort ?? null
     }
   });
 
   return {
-    turnId: response.turn_id
+    turnId: response.turn_id,
+    turn: response.turn ?? null
   } satisfies CodexAppSendTurnResponse;
 }
 

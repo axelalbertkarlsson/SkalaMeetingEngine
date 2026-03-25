@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { BottomPanel, type BottomPanelView } from "./components/shell/BottomPanel";
 import { CodexWorkbench } from "./components/shell/CodexWorkbench";
@@ -41,6 +41,7 @@ import {
   stopRecording,
   type TranscriptionSettings
 } from "./lib/meetingApi";
+import { getResolvedCodexModelOption } from "./lib/codexModelOptions";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
 import { useCodexController } from "./hooks/useCodexController";
 import {
@@ -52,6 +53,7 @@ import {
   writeDocumentMarkdownToLocalStorage,
   writeDocumentNoteFile
 } from "./services/documentsFileStore";
+import type { CodexReasoningEffort } from "./models/codex";
 import type { Artifact, RecordingSource, Run, RunStatus } from "./models/run";
 import { CaptureScreen } from "./screens/CaptureScreen";
 import { CodexScreen } from "./screens/CodexScreen";
@@ -559,6 +561,14 @@ function App() {
     "settings.codex.captureDebugBundle",
     false
   );
+  const [codexSelectedModel, setCodexSelectedModel] = useLocalStorageState<string | null>(
+    "settings.codex.selectedModel",
+    null
+  );
+  const [codexReasoningEffort, setCodexReasoningEffort] = useLocalStorageState<CodexReasoningEffort | null>(
+    "settings.codex.reasoningEffort",
+    null
+  );
   const [documentsOpenInNewTab, setDocumentsOpenInNewTab] = useLocalStorageState<boolean>(
     "settings.documents.openInNewTab",
     true
@@ -626,8 +636,42 @@ function App() {
   const codexController = useCodexController({
     workspaceRoot: workspace.rootPath,
     commandPath: codexCommandPath,
-    captureDebugBundle: codexCaptureDebugBundle
+    captureDebugBundle: codexCaptureDebugBundle,
+    selectedModel: codexSelectedModel,
+    reasoningEffort: codexReasoningEffort
   });
+  const resolvedCodexModelOption = useMemo(
+    () =>
+      getResolvedCodexModelOption(
+        codexController.availableModels,
+        codexSelectedModel,
+        codexController.effectiveConfig.model
+      ),
+    [codexController.availableModels, codexController.effectiveConfig.model, codexSelectedModel]
+  );
+
+  useEffect(() => {
+    if (!codexReasoningEffort || !resolvedCodexModelOption) {
+      return;
+    }
+
+    if (resolvedCodexModelOption.supportedReasoningEfforts.length === 0) {
+      return;
+    }
+
+    const supportsSelectedEffort = resolvedCodexModelOption.supportedReasoningEfforts.some(
+      (option) => option.reasoningEffort === codexReasoningEffort
+    );
+    if (supportsSelectedEffort) {
+      return;
+    }
+
+    setCodexReasoningEffort(resolvedCodexModelOption.defaultReasoningEffort);
+  }, [
+    codexReasoningEffort,
+    resolvedCodexModelOption,
+    setCodexReasoningEffort
+  ]);
 
   const sidebarGroupsBySection = useMemo<Record<SectionId, SidebarGroupData[]>>(() => {
     const recentMeetingRuns = sortedRuns.filter(
@@ -1595,6 +1639,24 @@ function App() {
       : activeTab.kind === "document"
         ? "documents"
         : activeSection;
+  const codexSurfaceVisible =
+    contentSection === "codex"
+    || (rightDockOpen && activeRightDockTab === "codex");
+  const codexSurfaceWasVisibleRef = useRef(false);
+
+  useEffect(() => {
+    if (!codexSurfaceVisible) {
+      codexSurfaceWasVisibleRef.current = false;
+      return;
+    }
+
+    if (codexSurfaceWasVisibleRef.current) {
+      return;
+    }
+
+    codexSurfaceWasVisibleRef.current = true;
+    void codexController.startSession();
+  }, [codexController.startSession, codexSurfaceVisible]);
 
   const activeDocumentNoteId = (() => {
     if (contentSection !== "documents") {
@@ -2229,6 +2291,11 @@ function App() {
           session={codexController.session}
           threads={codexController.threads}
           threadsLoading={codexController.threadsLoading}
+          availableModels={codexController.availableModels}
+          modelsLoading={codexController.modelsLoading}
+          selectedModel={codexSelectedModel}
+          effectiveModelId={codexController.effectiveConfig.model}
+          reasoningEffort={codexReasoningEffort}
           historyPanelOpen={codexController.historyPanelOpen}
           draft={codexController.draft}
           contextItems={codexController.contextItems}
@@ -2254,6 +2321,8 @@ function App() {
           onSelectThread={codexController.selectThread}
           onRenameThread={codexController.renameThread}
           onArchiveThread={codexController.archiveThread}
+          onSelectedModelChange={setCodexSelectedModel}
+          onReasoningEffortChange={setCodexReasoningEffort}
         />
       );
     }
@@ -2264,6 +2333,12 @@ function App() {
         selectedCategory={settingsCategory}
         codexCommandPath={codexCommandPath}
         codexCaptureDebugBundle={codexCaptureDebugBundle}
+        codexSelectedModel={codexSelectedModel}
+        codexReasoningEffort={codexReasoningEffort}
+        codexEffectiveModelId={codexController.effectiveConfig.model}
+        codexEffectiveReasoningEffort={codexController.effectiveConfig.reasoningEffort}
+        codexAvailableModels={codexController.availableModels}
+        codexModelsLoading={codexController.modelsLoading}
         documentsOpenInNewTab={documentsOpenInNewTab}
         documentsBasePath={documentsBasePath}
         documentsEditorFont={documentsEditorFont}
@@ -2271,6 +2346,8 @@ function App() {
         transcriptionStatusMessage={transcriptionStatusMessage}
         onCodexCommandPathChange={setCodexCommandPath}
         onCodexCaptureDebugBundleChange={setCodexCaptureDebugBundle}
+        onCodexSelectedModelChange={setCodexSelectedModel}
+        onCodexReasoningEffortChange={setCodexReasoningEffort}
         onDocumentsOpenInNewTabChange={setDocumentsOpenInNewTab}
         onDocumentsBasePathChange={setDocumentsBasePath}
         onDocumentsEditorFontChange={setDocumentsEditorFont}
@@ -2424,6 +2501,11 @@ function App() {
               session={codexController.session}
               threads={codexController.threads}
               threadsLoading={codexController.threadsLoading}
+              availableModels={codexController.availableModels}
+              modelsLoading={codexController.modelsLoading}
+              selectedModel={codexSelectedModel}
+              effectiveModelId={codexController.effectiveConfig.model}
+              reasoningEffort={codexReasoningEffort}
               historyPanelOpen={codexController.historyPanelOpen}
               draft={codexController.draft}
               contextItems={codexController.contextItems}
@@ -2449,6 +2531,8 @@ function App() {
               onSelectThread={codexController.selectThread}
               onRenameThread={codexController.renameThread}
               onArchiveThread={codexController.archiveThread}
+              onSelectedModelChange={setCodexSelectedModel}
+              onReasoningEffortChange={setCodexReasoningEffort}
             />
           }
           infoContent={
