@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  formatCodexModelLabel,
+  formatReasoningEffortLabel,
+  getCodexModelSelectOptions,
+  getCodexReasoningSelectOptions,
+  getResolvedCodexModelOption
+} from "../../lib/codexModelOptions.js";
 import type {
   CodexContextItem,
   CodexConversationEntry,
+  CodexModelOption,
+  CodexReasoningEffort,
   CodexSessionState,
   CodexThreadSummary
 } from "../../models/codex.js";
@@ -27,6 +36,11 @@ interface CodexWorkbenchProps {
   session: CodexSessionState;
   threads: CodexThreadSummary[];
   threadsLoading: boolean;
+  availableModels: CodexModelOption[];
+  modelsLoading: boolean;
+  selectedModel: string | null;
+  effectiveModelId: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
   historyPanelOpen: boolean;
   draft: string;
   contextItems: CodexContextItem[];
@@ -50,6 +64,8 @@ interface CodexWorkbenchProps {
   onSelectThread: (threadId: string) => void;
   onRenameThread: (threadId: string, title: string) => void;
   onArchiveThread: (threadId: string) => void;
+  onSelectedModelChange: (value: string | null) => void;
+  onReasoningEffortChange: (value: CodexReasoningEffort | null) => void;
 }
 
 function getStatusTone(status: CodexSessionState["status"]) {
@@ -92,6 +108,10 @@ function truncateSingleLineText(text: string) {
   return text.replace(/\s+/g, " ").trim();
 }
 
+function getControlWidth(label: string, extraChars = 6, minChars = 11) {
+  return `${Math.max(label.length + extraChars, minChars)}ch`;
+}
+
 function formatThreadMeta(thread: CodexThreadSummary) {
   if (!thread.updatedAt) {
     return thread.status ?? "Saved chat";
@@ -110,12 +130,23 @@ function formatThreadMeta(thread: CodexThreadSummary) {
   }).format(parsed);
 }
 
+interface DockConversationBlock {
+  id: string;
+  question: string | null;
+  entries: CodexConversationEntry[];
+}
+
 export function CodexWorkbench({
   variant,
   workspacePath,
   session,
   threads,
   threadsLoading,
+  availableModels,
+  modelsLoading,
+  selectedModel,
+  effectiveModelId,
+  reasoningEffort,
   historyPanelOpen,
   draft,
   contextItems,
@@ -138,12 +169,15 @@ export function CodexWorkbench({
   onToggleHistoryPanel,
   onSelectThread,
   onRenameThread,
-  onArchiveThread
+  onArchiveThread,
+  onSelectedModelChange,
+  onReasoningEffortChange
 }: CodexWorkbenchProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
   const [requestAnswers, setRequestAnswers] = useState<Record<string, string[]>>({});
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [activeDockBlockId, setActiveDockBlockId] = useState<string | null>(null);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -192,7 +226,7 @@ export function CodexWorkbench({
     };
   }, [conversationEntries]);
 
-  const primaryUserPrompt = useMemo(() => {
+  const firstUserPrompt = useMemo(() => {
     const firstEntry = conversationEntries.find(
       (entry) => entry.kind === "user_message" && entry.text.trim().length > 0
     );
@@ -209,10 +243,74 @@ export function CodexWorkbench({
     return activeThread?.name ?? "";
   }, [conversationEntries, lastSubmittedPrompt, session.activeThreadId, threads]);
 
-  const dockFeedEntries = useMemo(() => conversationEntries, [conversationEntries]);
+  const latestUserPrompt = useMemo(() => {
+    const nextEntries = [...conversationEntries].reverse();
+    const latestEntry = nextEntries.find(
+      (entry) => entry.kind === "user_message" && entry.text.trim().length > 0
+    );
 
+    if (latestEntry) {
+      return truncateSingleLineText(latestEntry.text);
+    }
+
+    if (lastSubmittedPrompt) {
+      return truncateSingleLineText(lastSubmittedPrompt);
+    }
+
+    return "";
+  }, [conversationEntries, lastSubmittedPrompt]);
+
+  const dockFeedEntries = useMemo(() => conversationEntries, [conversationEntries]);
+  const dockConversationBlocks = useMemo<DockConversationBlock[]>(() => {
+    const blocks: DockConversationBlock[] = [];
+    let currentBlock: DockConversationBlock | null = null;
+
+    dockFeedEntries.forEach((entry, index) => {
+      if (entry.kind === "user_message") {
+        currentBlock = {
+          id: entry.turnId || entry.id,
+          question: entry.text.trim().length > 0 ? truncateSingleLineText(entry.text) : null,
+          entries: [entry]
+        };
+        blocks.push(currentBlock);
+        return;
+      }
+
+      if (!currentBlock) {
+        currentBlock = {
+          id: entry.turnId || entry.id || `dock-block-${index}`,
+          question: null,
+          entries: []
+        };
+        blocks.push(currentBlock);
+      }
+
+      currentBlock.entries.push(entry);
+    });
+
+    return blocks;
+  }, [dockFeedEntries]);
+  const latestQuestionBlock = useMemo(
+    () => [...dockConversationBlocks].reverse().find((block) => block.question) ?? null,
+    [dockConversationBlocks]
+  );
+  const activeDockQuestion = useMemo(() => {
+    const activeBlock = dockConversationBlocks.find((block) => block.id === activeDockBlockId);
+    if (activeBlock?.question) {
+      return activeBlock.question;
+    }
+
+    return latestUserPrompt || firstUserPrompt;
+  }, [activeDockBlockId, dockConversationBlocks, firstUserPrompt, latestUserPrompt]);
+
+  const hasSubmittedQuestion = Boolean(
+    latestUserPrompt
+      || pendingSendId
+      || session.activeTurnId
+      || pendingUserInputRequest
+  );
   const hasDockConversation = Boolean(
-    primaryUserPrompt
+    latestUserPrompt
       || dockFeedEntries.length
       || pendingSendId
       || session.activeTurnId
@@ -220,9 +318,142 @@ export function CodexWorkbench({
       || session.activeThreadId
   );
   const showDockWaitingPlaceholder = hasDockConversation
-    && !primaryUserPrompt
+    && !activeDockQuestion
     && dockFeedEntries.length === 0
     && !pendingUserInputRequest;
+  const resolvedModelOption = useMemo(
+    () => getResolvedCodexModelOption(availableModels, selectedModel, effectiveModelId),
+    [availableModels, effectiveModelId, selectedModel]
+  );
+  const modelSelectOptions = useMemo(
+    () => getCodexModelSelectOptions(availableModels, selectedModel),
+    [availableModels, selectedModel]
+  );
+  const reasoningSelectOptions = useMemo(() => {
+    return getCodexReasoningSelectOptions(resolvedModelOption, reasoningEffort);
+  }, [reasoningEffort, resolvedModelOption]);
+  const selectedReasoningOption = useMemo(
+    () =>
+      reasoningSelectOptions.find((option) => option.reasoningEffort === reasoningEffort) ?? null,
+    [reasoningEffort, reasoningSelectOptions]
+  );
+  const reasoningSelectDisabled = !resolvedModelOption && reasoningSelectOptions.length === 0;
+  const selectedModelLabel = useMemo(() => {
+    if (!selectedModel) {
+      return "Default";
+    }
+
+    return (
+      modelSelectOptions.find((model) => model.id === selectedModel)?.displayName
+      ?? resolvedModelOption?.displayName
+      ?? formatCodexModelLabel(selectedModel)
+    );
+  }, [modelSelectOptions, resolvedModelOption, selectedModel]);
+  const selectedReasoningLabel = reasoningEffort
+    ? formatReasoningEffortLabel(reasoningEffort)
+    : "Default";
+
+  useEffect(() => {
+    if (variant !== "dock") {
+      return;
+    }
+
+    setActiveDockBlockId(latestQuestionBlock?.id ?? null);
+  }, [latestQuestionBlock, variant]);
+
+  useEffect(() => {
+    if (variant !== "dock") {
+      return;
+    }
+
+    const feed = feedRef.current;
+    if (!feed) {
+      return;
+    }
+
+    const updateActiveDockQuestion = () => {
+      const blockElements = Array.from(feed.querySelectorAll<HTMLElement>("[data-codex-dock-block-id]"));
+      if (!blockElements.length) {
+        setActiveDockBlockId(null);
+        return;
+      }
+
+      const feedRect = feed.getBoundingClientRect();
+      const topOffset = feedRect.top + 24;
+      let nextBlockId = blockElements[blockElements.length - 1]?.dataset.codexDockBlockId ?? null;
+
+      for (const blockElement of blockElements) {
+        const blockRect = blockElement.getBoundingClientRect();
+        if (blockRect.bottom >= topOffset) {
+          nextBlockId = blockElement.dataset.codexDockBlockId ?? nextBlockId;
+          break;
+        }
+      }
+
+      setActiveDockBlockId((current) => (current === nextBlockId ? current : nextBlockId));
+    };
+
+    const rafId = window.requestAnimationFrame(updateActiveDockQuestion);
+    feed.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
+    window.addEventListener("resize", updateActiveDockQuestion);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      feed.removeEventListener("scroll", updateActiveDockQuestion);
+      window.removeEventListener("resize", updateActiveDockQuestion);
+    };
+  }, [dockConversationBlocks, variant]);
+
+  const renderSessionControls = (mode: "dock" | "page") => (
+    <div className={`codex-session-controls codex-session-controls-${mode}`}>
+      <label className="codex-session-control">
+        <select
+          className="settings-text-input"
+          aria-label="Codex model"
+          title="Choose the Codex model"
+          value={selectedModel ?? ""}
+          style={{ width: getControlWidth(selectedModelLabel) }}
+          onChange={(event) => onSelectedModelChange(event.target.value || null)}
+        >
+          <option value="">Default</option>
+          {modelsLoading && availableModels.length === 0 ? (
+            <option value="" disabled>
+              Loading available models...
+            </option>
+          ) : null}
+          {modelSelectOptions.map((model) => (
+            <option key={model.id} value={model.id}>{model.displayName}</option>
+          ))}
+        </select>
+      </label>
+      <label className="codex-session-control">
+        <select
+          className="settings-text-input"
+          aria-label="Codex reasoning strength"
+          title={selectedReasoningOption?.description ?? "Choose the reasoning strength"}
+          value={reasoningEffort ?? ""}
+          style={{ width: getControlWidth(selectedReasoningLabel, 7, 12) }}
+          disabled={reasoningSelectDisabled}
+          onChange={(event) =>
+            onReasoningEffortChange(
+              (event.target.value || null) as CodexReasoningEffort | null
+            )
+          }
+        >
+          <option value="">Default</option>
+          {reasoningSelectOptions.map((option) => (
+            <option
+              key={option.reasoningEffort}
+              value={option.reasoningEffort}
+              title={option.description ?? undefined}
+            >
+              {formatReasoningEffortLabel(option.reasoningEffort)}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
 
   const renderPendingUserInputRequest = () => {
     if (!pendingUserInputRequest) {
@@ -367,6 +598,7 @@ export function CodexWorkbench({
           ) : null}
         </div>
       </div>
+      {renderSessionControls("dock")}
       {contextItems.length ? renderContextChips() : null}
     </section>
   );
@@ -454,8 +686,8 @@ export function CodexWorkbench({
       <section className="codex-workbench codex-workbench-dock codex-workbench-cursor">
         <div className={`codex-cursor-sticky-top${showDockWaitingPlaceholder ? " codex-cursor-sticky-top-waiting" : ""}`}>
           <header className="codex-cursor-toolbar">
-            <div className="codex-cursor-toolbar-title" title={primaryUserPrompt || "New Chat"}>
-              {primaryUserPrompt || "New Chat"}
+            <div className="codex-cursor-toolbar-title" title={activeDockQuestion || "New Chat"}>
+              {activeDockQuestion || "New Chat"}
             </div>
             <div className="codex-cursor-toolbar-actions">
               <button
@@ -502,12 +734,12 @@ export function CodexWorkbench({
             </div>
           ) : null}
 
-          {hasDockConversation ? (
+          {hasSubmittedQuestion ? (
             <div
-              className={`codex-cursor-question-pill${primaryUserPrompt ? "" : " codex-cursor-question-pill-placeholder"}`}
-              title={primaryUserPrompt}
+              className={`codex-cursor-question-pill${activeDockQuestion ? "" : " codex-cursor-question-pill-placeholder"}`}
+              title={activeDockQuestion}
             >
-              {primaryUserPrompt || "Waiting for Codex..."}
+              {activeDockQuestion || "Waiting for Codex..."}
             </div>
           ) : (
             renderComposer("expanded")
@@ -523,15 +755,23 @@ export function CodexWorkbench({
 
           <div ref={feedRef} className="codex-feed codex-feed-dock" aria-label="Codex conversation">
             {dockFeedEntries.length ? (
-              dockFeedEntries.map((entry) => (
-                <article key={entry.id} className={getEntryClassName(entry)}>
-                  <header className="codex-feed-entry-header">
-                    <strong>{entry.title}</strong>
-                    {entry.status ? <span className="codex-feed-entry-status">{entry.status}</span> : null}
-                  </header>
-                  {entry.meta ? <p className="codex-feed-entry-meta">{entry.meta}</p> : null}
-                  <pre className="codex-feed-entry-text">{entry.text || " "}</pre>
-                </article>
+              dockConversationBlocks.map((block) => (
+                <section
+                  key={block.id}
+                  className="codex-feed-dock-block"
+                  data-codex-dock-block-id={block.id}
+                >
+                  {block.entries.map((entry) => (
+                    <article key={entry.id} className={getEntryClassName(entry)}>
+                      <header className="codex-feed-entry-header">
+                        <strong>{entry.title}</strong>
+                        {entry.status ? <span className="codex-feed-entry-status">{entry.status}</span> : null}
+                      </header>
+                      {entry.meta ? <p className="codex-feed-entry-meta">{entry.meta}</p> : null}
+                      <pre className="codex-feed-entry-text">{entry.text || " "}</pre>
+                    </article>
+                  ))}
+                </section>
               ))
             ) : (
               <p className="muted codex-feed-empty">
@@ -547,7 +787,7 @@ export function CodexWorkbench({
           </div>
         </div>
 
-        {hasDockConversation ? (
+        {hasSubmittedQuestion ? (
           <div className="codex-cursor-sticky-bottom">
             {renderComposer("compact")}
           </div>
@@ -671,6 +911,7 @@ export function CodexWorkbench({
               <strong>Composer</strong>
               <span className="muted">Cmd/Ctrl+Enter to send</span>
             </div>
+            {renderSessionControls("page")}
             <textarea
               ref={textareaRef}
               className="codex-composer-input"

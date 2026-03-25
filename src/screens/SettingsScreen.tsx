@@ -1,5 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PaneHeader } from "../components/shell/PaneHeader";
+import {
+  formatReasoningEffortLabel,
+  getCodexModelDisplayName,
+  getCodexModelSelectOptions,
+  getCodexReasoningSelectOptions,
+  getResolvedCodexModelOption
+} from "../lib/codexModelOptions";
+import type { CodexModelOption, CodexReasoningEffort } from "../models/codex";
 import type { Workspace } from "../models/workspace";
 import type { TranscriptionSettings } from "../lib/meetingApi";
 
@@ -10,6 +18,12 @@ interface SettingsScreenProps {
   selectedCategory: string;
   codexCommandPath: string;
   codexCaptureDebugBundle: boolean;
+  codexSelectedModel: string | null;
+  codexReasoningEffort: CodexReasoningEffort | null;
+  codexEffectiveModelId: string | null;
+  codexEffectiveReasoningEffort: CodexReasoningEffort | null;
+  codexAvailableModels: CodexModelOption[];
+  codexModelsLoading: boolean;
   documentsOpenInNewTab: boolean;
   documentsBasePath: string;
   documentsEditorFont: DocumentsEditorFont;
@@ -17,6 +31,8 @@ interface SettingsScreenProps {
   transcriptionStatusMessage: string | null;
   onCodexCommandPathChange: (value: string) => void;
   onCodexCaptureDebugBundleChange: (value: boolean) => void;
+  onCodexSelectedModelChange: (value: string | null) => void;
+  onCodexReasoningEffortChange: (value: CodexReasoningEffort | null) => void;
   onDocumentsOpenInNewTabChange: (value: boolean) => void;
   onDocumentsBasePathChange: (value: string) => void;
   onDocumentsEditorFontChange: (value: DocumentsEditorFont) => void;
@@ -36,6 +52,12 @@ export function SettingsScreen({
   selectedCategory,
   codexCommandPath,
   codexCaptureDebugBundle,
+  codexSelectedModel,
+  codexReasoningEffort,
+  codexEffectiveModelId,
+  codexEffectiveReasoningEffort,
+  codexAvailableModels,
+  codexModelsLoading,
   documentsOpenInNewTab,
   documentsBasePath,
   documentsEditorFont,
@@ -43,6 +65,8 @@ export function SettingsScreen({
   transcriptionStatusMessage,
   onCodexCommandPathChange,
   onCodexCaptureDebugBundleChange,
+  onCodexSelectedModelChange,
+  onCodexReasoningEffortChange,
   onDocumentsOpenInNewTabChange,
   onDocumentsBasePathChange,
   onDocumentsEditorFontChange,
@@ -53,6 +77,28 @@ export function SettingsScreen({
   const [draftTranscriptionSettings, setDraftTranscriptionSettings] =
     useState<TranscriptionSettings>(transcriptionSettings);
   const [savingTranscription, setSavingTranscription] = useState(false);
+  const resolvedCodexModelOption = useMemo(
+    () => getResolvedCodexModelOption(codexAvailableModels, codexSelectedModel, codexEffectiveModelId),
+    [codexAvailableModels, codexEffectiveModelId, codexSelectedModel]
+  );
+  const codexModelOptions = useMemo(
+    () => getCodexModelSelectOptions(codexAvailableModels, codexSelectedModel),
+    [codexAvailableModels, codexSelectedModel]
+  );
+  const codexReasoningOptions = useMemo(
+    () => getCodexReasoningSelectOptions(resolvedCodexModelOption, codexReasoningEffort),
+    [codexReasoningEffort, resolvedCodexModelOption]
+  );
+  const selectedCodexReasoningOption = useMemo(
+    () =>
+      codexReasoningOptions.find((option) => option.reasoningEffort === codexReasoningEffort) ?? null,
+    [codexReasoningEffort, codexReasoningOptions]
+  );
+  const codexReasoningDisabled = !resolvedCodexModelOption && codexReasoningOptions.length === 0;
+  const codexSelectedModelLabel = codexSelectedModel
+    ? getCodexModelDisplayName(codexAvailableModels, codexSelectedModel) ?? codexSelectedModel
+    : null;
+  const codexEffectiveModelLabel = getCodexModelDisplayName(codexAvailableModels, codexEffectiveModelId);
 
   useEffect(() => {
     setDraftCodexPath(codexCommandPath);
@@ -130,6 +176,21 @@ export function SettingsScreen({
         { label: "Execution mode", value: "Local Codex CLI app-server" },
         { label: "Workspace binding", value: workspace.rootPath },
         { label: "Configured command", value: codexCommandPath || "codex" },
+        {
+          label: "Selected model",
+          value: codexSelectedModelLabel
+            ?? (codexEffectiveModelLabel
+              ? `Default: ${codexEffectiveModelLabel}`
+              : "Default")
+        },
+        {
+          label: "Reasoning strength",
+          value: codexReasoningEffort
+            ? formatReasoningEffortLabel(codexReasoningEffort)
+            : codexEffectiveReasoningEffort
+              ? `Default: ${formatReasoningEffortLabel(codexEffectiveReasoningEffort)}`
+              : "Default"
+        },
         { label: "Transport", value: "JSON-RPC over stdio (JSONL)" },
         { label: "Diagnostics", value: codexCaptureDebugBundle ? "Reserved flag enabled" : "Reserved flag disabled" }
       ]
@@ -293,6 +354,57 @@ export function SettingsScreen({
           <p className="muted settings-help-copy">
             The shared Codex dock and page now talk to <code>codex app-server</code> over stdio.
             The dock stages file paths as structured context, while the page reuses the same live thread.
+          </p>
+
+          <div className="meeting-form-grid">
+            <label className="meeting-field">
+              <span>Model default</span>
+              <select
+                className="settings-text-input"
+                value={codexSelectedModel ?? ""}
+                onChange={(event) => onCodexSelectedModelChange(event.target.value || null)}
+              >
+                <option value="">Default</option>
+                {codexModelOptions.map((model) => (
+                  <option key={model.id} value={model.id}>{model.displayName}</option>
+                ))}
+              </select>
+            </label>
+            <label className="meeting-field">
+              <span>Reasoning strength</span>
+              <select
+                className="settings-text-input"
+                title={selectedCodexReasoningOption?.description ?? "Choose the reasoning strength"}
+                value={codexReasoningEffort ?? ""}
+                disabled={codexReasoningDisabled}
+                onChange={(event) =>
+                  onCodexReasoningEffortChange(
+                    (event.target.value || null) as CodexReasoningEffort | null
+                  )
+                }
+              >
+                <option value="">Default</option>
+                {codexReasoningOptions.map((option) => (
+                  <option
+                    key={option.reasoningEffort}
+                    value={option.reasoningEffort}
+                    title={option.description ?? undefined}
+                  >
+                    {formatReasoningEffortLabel(option.reasoningEffort)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <p className="muted settings-help-copy">
+            {codexModelsLoading
+              ? "Loading the Codex model catalog and effective config from app-server..."
+              : resolvedCodexModelOption
+                ? codexSelectedModel
+                  ? `Reasoning options are constrained to ${resolvedCodexModelOption.displayName}. These defaults are shared by the dock and full-page Codex session.`
+                  : `Default model currently resolves to ${resolvedCodexModelOption.displayName}. These defaults are shared by the dock and full-page Codex session.`
+                : "Codex has not reported the effective model yet, so reasoning stays constrained to Default. Default model selection still follows your Codex config.toml behavior."}
           </p>
 
           <div className="settings-toggle-row">
