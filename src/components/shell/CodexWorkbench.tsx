@@ -130,24 +130,6 @@ function formatThreadMeta(thread: CodexThreadSummary) {
   }).format(parsed);
 }
 
-function getScrollContainer(element: HTMLElement | null): HTMLElement | Window {
-  let current = element?.parentElement ?? null;
-
-  while (current) {
-    const styles = window.getComputedStyle(current);
-    const overflowY = styles.overflowY;
-    const isScrollable = /(auto|scroll|overlay)/.test(overflowY);
-
-    if (isScrollable && current.scrollHeight > current.clientHeight) {
-      return current;
-    }
-
-    current = current.parentElement;
-  }
-
-  return window;
-}
-
 interface DockConversationBlock {
   id: string;
   question: string | null;
@@ -193,10 +175,8 @@ export function CodexWorkbench({
 }: CodexWorkbenchProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
-  const stickyTopRef = useRef<HTMLDivElement | null>(null);
   const [requestAnswers, setRequestAnswers] = useState<Record<string, string[]>>({});
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
-  const [activeDockBlockId, setActiveDockBlockId] = useState<string | null>(null);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -309,19 +289,6 @@ export function CodexWorkbench({
 
     return blocks;
   }, [dockFeedEntries]);
-  const firstDockUserMessageId = useMemo(
-    () => dockFeedEntries.find((entry) => entry.kind === "user_message")?.id ?? null,
-    [dockFeedEntries]
-  );
-  const activeDockQuestion = useMemo(() => {
-    const activeBlock = dockConversationBlocks.find((block) => block.id === activeDockBlockId);
-    if (activeBlock?.question) {
-      return activeBlock.question;
-    }
-
-    return firstUserPrompt;
-  }, [activeDockBlockId, dockConversationBlocks, firstUserPrompt]);
-
   const hasSubmittedQuestion = Boolean(
     latestUserPrompt
       || pendingSendId
@@ -337,7 +304,6 @@ export function CodexWorkbench({
       || session.activeThreadId
   );
   const showDockWaitingPlaceholder = hasDockConversation
-    && !activeDockQuestion
     && dockFeedEntries.length === 0
     && !pendingUserInputRequest;
   const resolvedModelOption = useMemo(
@@ -371,86 +337,6 @@ export function CodexWorkbench({
   const selectedReasoningLabel = reasoningEffort
     ? formatReasoningEffortLabel(reasoningEffort)
     : "Default";
-
-  useEffect(() => {
-    if (variant !== "dock") {
-      return;
-    }
-
-    const feed = feedRef.current;
-    if (!feed) {
-      return;
-    }
-
-    const scrollContainer = getScrollContainer(feed);
-
-    const updateActiveDockQuestion = () => {
-      const blockElements = Array.from(feed.querySelectorAll<HTMLElement>("[data-codex-dock-block-id]"));
-      if (!blockElements.length) {
-        setActiveDockBlockId(null);
-        return;
-      }
-
-      const questionElements = Array.from(
-        feed.querySelectorAll<HTMLElement>("[data-codex-dock-question-block-id]")
-      );
-      const stickyBottom = stickyTopRef.current?.getBoundingClientRect().bottom ?? feed.getBoundingClientRect().top;
-      const switchOffset = stickyBottom;
-
-      if (questionElements.length) {
-        let nextQuestionBlockId = blockElements[0]?.dataset.codexDockBlockId ?? null;
-
-        for (const questionElement of questionElements) {
-          const questionRect = questionElement.getBoundingClientRect();
-          if (questionRect.top <= switchOffset) {
-            nextQuestionBlockId = questionElement.dataset.codexDockQuestionBlockId ?? nextQuestionBlockId;
-            continue;
-          }
-
-          break;
-        }
-
-        setActiveDockBlockId((current) =>
-          current === nextQuestionBlockId ? current : nextQuestionBlockId
-        );
-        return;
-      }
-
-      let nextBlockId = blockElements[0]?.dataset.codexDockBlockId ?? null;
-
-      for (const blockElement of blockElements) {
-        const blockRect = blockElement.getBoundingClientRect();
-        if (blockRect.top <= switchOffset) {
-          nextBlockId = blockElement.dataset.codexDockBlockId ?? nextBlockId;
-          continue;
-        }
-
-        break;
-      }
-
-      setActiveDockBlockId((current) => (current === nextBlockId ? current : nextBlockId));
-    };
-
-    const rafId = window.requestAnimationFrame(updateActiveDockQuestion);
-    feed.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
-    if (scrollContainer === window) {
-      window.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
-    } else {
-      scrollContainer.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
-    }
-    window.addEventListener("resize", updateActiveDockQuestion);
-
-    return () => {
-      window.cancelAnimationFrame(rafId);
-      feed.removeEventListener("scroll", updateActiveDockQuestion);
-      if (scrollContainer === window) {
-        window.removeEventListener("scroll", updateActiveDockQuestion);
-      } else {
-        scrollContainer.removeEventListener("scroll", updateActiveDockQuestion);
-      }
-      window.removeEventListener("resize", updateActiveDockQuestion);
-    };
-  }, [dockConversationBlocks, variant]);
 
   const renderSessionControls = (mode: "dock" | "page") => (
     <div className={`codex-session-controls codex-session-controls-${mode}`}>
@@ -734,10 +620,7 @@ export function CodexWorkbench({
   if (variant === "dock") {
     return (
       <section className="codex-workbench codex-workbench-dock codex-workbench-cursor">
-        <div
-          ref={stickyTopRef}
-          className={`codex-cursor-sticky-top${showDockWaitingPlaceholder ? " codex-cursor-sticky-top-waiting" : ""}`}
-        >
+        <div className={`codex-cursor-sticky-top${showDockWaitingPlaceholder ? " codex-cursor-sticky-top-waiting" : ""}`}>
           <header className="codex-cursor-toolbar">
             <div className="codex-cursor-toolbar-title" title={firstUserPrompt || "New Chat"}>
               {firstUserPrompt || "New Chat"}
@@ -796,16 +679,7 @@ export function CodexWorkbench({
             </div>
           ) : null}
 
-          {hasSubmittedQuestion ? (
-            <div
-              className={`codex-cursor-question-pill${activeDockQuestion ? "" : " codex-cursor-question-pill-placeholder"}`}
-              title={activeDockQuestion}
-            >
-              {activeDockQuestion || "Waiting for Codex..."}
-            </div>
-          ) : (
-            renderComposer("expanded")
-          )}
+          {hasSubmittedQuestion ? null : renderComposer("expanded")}
         </div>
 
         <div className="codex-cursor-feed-shell">
@@ -819,9 +693,7 @@ export function CodexWorkbench({
             {dockFeedEntries.length ? (
               dockConversationBlocks.map((block) => (
                 (() => {
-                  const visibleEntries = block.entries.filter(
-                    (entry) => !(entry.kind === "user_message" && entry.id === firstDockUserMessageId)
-                  );
+                  const visibleEntries = block.entries;
 
                   if (!visibleEntries.length) {
                     return null;
@@ -837,9 +709,6 @@ export function CodexWorkbench({
                         <article
                           key={entry.id}
                           className={getEntryClassName(entry)}
-                          data-codex-dock-question-block-id={
-                            entry.kind === "user_message" ? block.id : undefined
-                          }
                         >
                           <header className="codex-feed-entry-header">
                             <strong>{entry.title}</strong>

@@ -1587,6 +1587,7 @@ table {
   min-width: 0;
   height: auto;
   min-height: 100%;
+  gap: 0;
 }
 
 .codex-workbench-page {
@@ -1597,6 +1598,7 @@ table {
   min-width: 0;
   background: var(--shell-sidebar-bg);
   color: var(--text-primary);
+  --codex-dock-question-sticky-top: 32px;
 }
 
 .codex-workbench-header {
@@ -1674,7 +1676,7 @@ table {
   display: grid;
   min-width: 0;
   gap: 4px;
-  padding: 4px 14px;
+  padding: 4px 10px;
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--shell-sidebar-bg) 98%, transparent) 0%,
@@ -1900,11 +1902,15 @@ table {
   overflow: hidden;
 }
 
+.codex-workbench-dock .codex-cursor-feed-shell {
+  overflow: visible;
+}
+
 .codex-cursor-sticky-bottom {
   position: sticky;
   bottom: 0;
   z-index: 3;
-  padding: 10px 14px 14px;
+  padding: 10px 10px 14px;
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--shell-sidebar-bg) 0%, transparent) 0%,
@@ -2171,8 +2177,12 @@ table {
 }
 
 .codex-feed-dock {
-  padding: 6px 14px 0;
+  padding: 0 10px 0;
   min-height: 0;
+}
+
+.codex-workbench-dock .codex-feed-dock {
+  overflow: visible;
 }
 
 .codex-feed-dock-block {
@@ -2209,7 +2219,22 @@ table {
 }
 
 .codex-workbench-cursor .codex-feed-entry-user {
-  padding: 0 2px 12px;
+  position: sticky;
+  top: var(--codex-dock-question-sticky-top);
+  z-index: 2;
+  align-self: start;
+  background:
+    linear-gradient(
+      180deg,
+      var(--shell-sidebar-bg) 0%,
+      color-mix(in srgb, var(--shell-sidebar-bg) 86%, transparent) 16px,
+      transparent 24px,
+      transparent calc(100% - 28px),
+      color-mix(in srgb, var(--shell-sidebar-bg) 92%, transparent) calc(100% - 16px),
+      color-mix(in srgb, var(--shell-sidebar-bg) 36%, transparent) calc(100% - 5px),
+      transparent 100%
+    ) 0 0 / 100% 100% no-repeat;
+  padding: 0 0 12px;
   border: 0;
 }
 
