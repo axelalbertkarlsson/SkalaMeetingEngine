@@ -130,6 +130,24 @@ function formatThreadMeta(thread: CodexThreadSummary) {
   }).format(parsed);
 }
 
+function getScrollContainer(element: HTMLElement | null): HTMLElement | Window {
+  let current = element?.parentElement ?? null;
+
+  while (current) {
+    const styles = window.getComputedStyle(current);
+    const overflowY = styles.overflowY;
+    const isScrollable = /(auto|scroll|overlay)/.test(overflowY);
+
+    if (isScrollable && current.scrollHeight > current.clientHeight) {
+      return current;
+    }
+
+    current = current.parentElement;
+  }
+
+  return window;
+}
+
 interface DockConversationBlock {
   id: string;
   question: string | null;
@@ -175,6 +193,7 @@ export function CodexWorkbench({
 }: CodexWorkbenchProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const stickyTopRef = useRef<HTMLDivElement | null>(null);
   const [requestAnswers, setRequestAnswers] = useState<Record<string, string[]>>({});
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [activeDockBlockId, setActiveDockBlockId] = useState<string | null>(null);
@@ -290,9 +309,9 @@ export function CodexWorkbench({
 
     return blocks;
   }, [dockFeedEntries]);
-  const latestQuestionBlock = useMemo(
-    () => [...dockConversationBlocks].reverse().find((block) => block.question) ?? null,
-    [dockConversationBlocks]
+  const firstDockUserMessageId = useMemo(
+    () => dockFeedEntries.find((entry) => entry.kind === "user_message")?.id ?? null,
+    [dockFeedEntries]
   );
   const activeDockQuestion = useMemo(() => {
     const activeBlock = dockConversationBlocks.find((block) => block.id === activeDockBlockId);
@@ -300,8 +319,8 @@ export function CodexWorkbench({
       return activeBlock.question;
     }
 
-    return latestUserPrompt || firstUserPrompt;
-  }, [activeDockBlockId, dockConversationBlocks, firstUserPrompt, latestUserPrompt]);
+    return firstUserPrompt;
+  }, [activeDockBlockId, dockConversationBlocks, firstUserPrompt]);
 
   const hasSubmittedQuestion = Boolean(
     latestUserPrompt
@@ -358,18 +377,12 @@ export function CodexWorkbench({
       return;
     }
 
-    setActiveDockBlockId(latestQuestionBlock?.id ?? null);
-  }, [latestQuestionBlock, variant]);
-
-  useEffect(() => {
-    if (variant !== "dock") {
-      return;
-    }
-
     const feed = feedRef.current;
     if (!feed) {
       return;
     }
+
+    const scrollContainer = getScrollContainer(feed);
 
     const updateActiveDockQuestion = () => {
       const blockElements = Array.from(feed.querySelectorAll<HTMLElement>("[data-codex-dock-block-id]"));
@@ -378,16 +391,41 @@ export function CodexWorkbench({
         return;
       }
 
-      const feedRect = feed.getBoundingClientRect();
-      const topOffset = feedRect.top + 24;
-      let nextBlockId = blockElements[blockElements.length - 1]?.dataset.codexDockBlockId ?? null;
+      const questionElements = Array.from(
+        feed.querySelectorAll<HTMLElement>("[data-codex-dock-question-block-id]")
+      );
+      const stickyBottom = stickyTopRef.current?.getBoundingClientRect().bottom ?? feed.getBoundingClientRect().top;
+      const switchOffset = stickyBottom;
+
+      if (questionElements.length) {
+        let nextQuestionBlockId = blockElements[0]?.dataset.codexDockBlockId ?? null;
+
+        for (const questionElement of questionElements) {
+          const questionRect = questionElement.getBoundingClientRect();
+          if (questionRect.top <= switchOffset) {
+            nextQuestionBlockId = questionElement.dataset.codexDockQuestionBlockId ?? nextQuestionBlockId;
+            continue;
+          }
+
+          break;
+        }
+
+        setActiveDockBlockId((current) =>
+          current === nextQuestionBlockId ? current : nextQuestionBlockId
+        );
+        return;
+      }
+
+      let nextBlockId = blockElements[0]?.dataset.codexDockBlockId ?? null;
 
       for (const blockElement of blockElements) {
         const blockRect = blockElement.getBoundingClientRect();
-        if (blockRect.bottom >= topOffset) {
+        if (blockRect.top <= switchOffset) {
           nextBlockId = blockElement.dataset.codexDockBlockId ?? nextBlockId;
-          break;
+          continue;
         }
+
+        break;
       }
 
       setActiveDockBlockId((current) => (current === nextBlockId ? current : nextBlockId));
@@ -395,11 +433,21 @@ export function CodexWorkbench({
 
     const rafId = window.requestAnimationFrame(updateActiveDockQuestion);
     feed.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
+    if (scrollContainer === window) {
+      window.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
+    } else {
+      scrollContainer.addEventListener("scroll", updateActiveDockQuestion, { passive: true });
+    }
     window.addEventListener("resize", updateActiveDockQuestion);
 
     return () => {
       window.cancelAnimationFrame(rafId);
       feed.removeEventListener("scroll", updateActiveDockQuestion);
+      if (scrollContainer === window) {
+        window.removeEventListener("scroll", updateActiveDockQuestion);
+      } else {
+        scrollContainer.removeEventListener("scroll", updateActiveDockQuestion);
+      }
       window.removeEventListener("resize", updateActiveDockQuestion);
     };
   }, [dockConversationBlocks, variant]);
@@ -574,30 +622,32 @@ export function CodexWorkbench({
           }
         }}
       />
-      <div className="codex-cursor-composer-footer">
-        <div className="codex-cursor-composer-pills">
-          {contextItems.length ? (
-            <button
-              type="button"
-              className="codex-cursor-inline-action"
-              onClick={onClearContextItems}
-            >
-              Clear context
-            </button>
-          ) : null}
+      {contextItems.length || mode === "compact" ? (
+        <div className="codex-cursor-composer-footer">
+          <div className="codex-cursor-composer-pills">
+            {contextItems.length ? (
+              <button
+                type="button"
+                className="codex-cursor-inline-action"
+                onClick={onClearContextItems}
+              >
+                Clear context
+              </button>
+            ) : null}
+          </div>
+          <div className="codex-cursor-composer-actions">
+            {mode === "compact" ? (
+              <button
+                type="button"
+                className="codex-cursor-inline-action"
+                onClick={onClearConversation}
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
         </div>
-        <div className="codex-cursor-composer-actions">
-          {mode === "compact" ? (
-            <button
-              type="button"
-              className="codex-cursor-inline-action"
-              onClick={onClearConversation}
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
-      </div>
+      ) : null}
       {renderSessionControls("dock")}
       {contextItems.length ? renderContextChips() : null}
     </section>
@@ -684,19 +734,23 @@ export function CodexWorkbench({
   if (variant === "dock") {
     return (
       <section className="codex-workbench codex-workbench-dock codex-workbench-cursor">
-        <div className={`codex-cursor-sticky-top${showDockWaitingPlaceholder ? " codex-cursor-sticky-top-waiting" : ""}`}>
+        <div
+          ref={stickyTopRef}
+          className={`codex-cursor-sticky-top${showDockWaitingPlaceholder ? " codex-cursor-sticky-top-waiting" : ""}`}
+        >
           <header className="codex-cursor-toolbar">
-            <div className="codex-cursor-toolbar-title" title={activeDockQuestion || "New Chat"}>
-              {activeDockQuestion || "New Chat"}
+            <div className="codex-cursor-toolbar-title" title={firstUserPrompt || "New Chat"}>
+              {firstUserPrompt || "New Chat"}
             </div>
             <div className="codex-cursor-toolbar-actions">
               <button
                 type="button"
                 className="codex-cursor-toolbar-button"
                 onClick={onToggleHistoryPanel}
+                aria-label="History"
                 title="History"
               >
-                h
+                ◷
               </button>
               <button
                 type="button"
@@ -709,16 +763,9 @@ export function CodexWorkbench({
               <button
                 type="button"
                 className="codex-cursor-toolbar-button"
-                onClick={canStop ? onStop : onStart}
-                title={canStop ? "Stop Codex" : "Start Codex"}
-              >
-                {canStop ? "o" : ">"}
-              </button>
-              <button
-                type="button"
-                className="codex-cursor-toolbar-button"
                 onClick={() => setStatusMenuOpen((current) => !current)}
-                title="Codex status"
+                aria-label="More actions"
+                title="More actions"
               >
                 ...
               </button>
@@ -731,6 +778,21 @@ export function CodexWorkbench({
                 {session.status.toUpperCase()}
               </span>
               <span className="codex-cursor-toolbar-menu-message">{session.message}</span>
+              <button
+                type="button"
+                className="codex-cursor-inline-action codex-cursor-toolbar-menu-action"
+                onClick={() => {
+                  setStatusMenuOpen(false);
+                  if (canStop) {
+                    onStop();
+                    return;
+                  }
+
+                  onStart();
+                }}
+              >
+                {canStop ? "Stop Codex" : "Start Codex"}
+              </button>
             </div>
           ) : null}
 
@@ -756,22 +818,40 @@ export function CodexWorkbench({
           <div ref={feedRef} className="codex-feed codex-feed-dock" aria-label="Codex conversation">
             {dockFeedEntries.length ? (
               dockConversationBlocks.map((block) => (
-                <section
-                  key={block.id}
-                  className="codex-feed-dock-block"
-                  data-codex-dock-block-id={block.id}
-                >
-                  {block.entries.map((entry) => (
-                    <article key={entry.id} className={getEntryClassName(entry)}>
-                      <header className="codex-feed-entry-header">
-                        <strong>{entry.title}</strong>
-                        {entry.status ? <span className="codex-feed-entry-status">{entry.status}</span> : null}
-                      </header>
-                      {entry.meta ? <p className="codex-feed-entry-meta">{entry.meta}</p> : null}
-                      <pre className="codex-feed-entry-text">{entry.text || " "}</pre>
-                    </article>
-                  ))}
-                </section>
+                (() => {
+                  const visibleEntries = block.entries.filter(
+                    (entry) => !(entry.kind === "user_message" && entry.id === firstDockUserMessageId)
+                  );
+
+                  if (!visibleEntries.length) {
+                    return null;
+                  }
+
+                  return (
+                    <section
+                      key={block.id}
+                      className="codex-feed-dock-block"
+                      data-codex-dock-block-id={block.id}
+                    >
+                      {visibleEntries.map((entry) => (
+                        <article
+                          key={entry.id}
+                          className={getEntryClassName(entry)}
+                          data-codex-dock-question-block-id={
+                            entry.kind === "user_message" ? block.id : undefined
+                          }
+                        >
+                          <header className="codex-feed-entry-header">
+                            <strong>{entry.title}</strong>
+                            {entry.status ? <span className="codex-feed-entry-status">{entry.status}</span> : null}
+                          </header>
+                          {entry.meta ? <p className="codex-feed-entry-meta">{entry.meta}</p> : null}
+                          <pre className="codex-feed-entry-text">{entry.text || " "}</pre>
+                        </article>
+                      ))}
+                    </section>
+                  );
+                })()
               ))
             ) : (
               <p className="muted codex-feed-empty">
