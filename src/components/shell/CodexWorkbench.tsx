@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   formatCodexModelLabel,
   formatReasoningEffortLabel,
@@ -102,6 +104,24 @@ function getEntryClassName(entry: CodexConversationEntry) {
   }
 
   return "codex-feed-entry codex-feed-entry-event";
+}
+
+function shouldRenderEntryAsMarkdown(entry: CodexConversationEntry) {
+  return entry.kind === "agent_message";
+}
+
+function renderEntryText(entry: CodexConversationEntry) {
+  const content = entry.text || " ";
+
+  if (shouldRenderEntryAsMarkdown(entry)) {
+    return (
+      <div className="codex-feed-entry-text codex-feed-entry-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      </div>
+    );
+  }
+
+  return <pre className="codex-feed-entry-text">{content}</pre>;
 }
 
 function truncateSingleLineText(text: string) {
@@ -715,7 +735,7 @@ export function CodexWorkbench({
                             {entry.status ? <span className="codex-feed-entry-status">{entry.status}</span> : null}
                           </header>
                           {entry.meta ? <p className="codex-feed-entry-meta">{entry.meta}</p> : null}
-                          <pre className="codex-feed-entry-text">{entry.text || " "}</pre>
+                          {renderEntryText(entry)}
                         </article>
                       ))}
                     </section>
@@ -823,7 +843,7 @@ export function CodexWorkbench({
                       {entry.status ? <span className="codex-feed-entry-status">{entry.status}</span> : null}
                     </header>
                     {entry.meta ? <p className="codex-feed-entry-meta">{entry.meta}</p> : null}
-                    <pre className="codex-feed-entry-text">{entry.text || " "}</pre>
+                    {renderEntryText(entry)}
                   </article>
                 ))
               ) : (
