@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CodexAccessMode,
   CodexEffectiveConfig,
   CodexReasoningEffort,
   CodexAppConnectResponse,
@@ -102,12 +103,14 @@ export async function startCodexThread(request: {
   connectionId: string;
   workspacePath: string;
   model?: string | null;
+  accessMode: CodexAccessMode;
 }) {
   const response = await invoke<CodexAppThreadWireResponse>("codex_app_start_thread", {
     request: {
       connection_id: request.connectionId,
       workspace_path: request.workspacePath,
-      model: request.model ?? null
+      model: request.model ?? null,
+      access_mode: request.accessMode
     }
   });
 
@@ -160,6 +163,7 @@ export async function sendCodexTurn(request: {
   expectedTurnId?: string | null;
   model?: string | null;
   effort?: CodexReasoningEffort | null;
+  accessMode: CodexAccessMode;
 }) {
   const response = await invoke<CodexAppSendTurnWireResponse>("codex_app_send_turn", {
     request: {
@@ -167,7 +171,8 @@ export async function sendCodexTurn(request: {
       prompt: request.prompt,
       expected_turn_id: request.expectedTurnId ?? null,
       model: request.model ?? null,
-      effort: request.effort ?? null
+      effort: request.effort ?? null,
+      access_mode: request.accessMode
     }
   });
 

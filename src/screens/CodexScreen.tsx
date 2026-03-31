@@ -1,6 +1,7 @@
 import { PaneHeader } from "../components/shell/PaneHeader";
 import { CodexWorkbench } from "../components/shell/CodexWorkbench";
 import type {
+  CodexAccessMode,
   CodexContextItem,
   CodexConversationEntry,
   CodexModelOption,
@@ -35,6 +36,7 @@ interface CodexScreenProps {
   selectedModel: string | null;
   effectiveModelId: string | null;
   reasoningEffort: CodexReasoningEffort | null;
+  accessMode: CodexAccessMode;
   historyPanelOpen: boolean;
   draft: string;
   contextItems: CodexContextItem[];
@@ -60,6 +62,7 @@ interface CodexScreenProps {
   onArchiveThread: (threadId: string) => void;
   onSelectedModelChange: (value: string | null) => void;
   onReasoningEffortChange: (value: CodexReasoningEffort | null) => void;
+  onAccessModeChange: (value: CodexAccessMode) => void;
 }
 
 export function CodexScreen({
@@ -72,6 +75,7 @@ export function CodexScreen({
   selectedModel,
   effectiveModelId,
   reasoningEffort,
+  accessMode,
   historyPanelOpen,
   draft,
   contextItems,
@@ -96,7 +100,8 @@ export function CodexScreen({
   onRenameThread,
   onArchiveThread,
   onSelectedModelChange,
-  onReasoningEffortChange
+  onReasoningEffortChange,
+  onAccessModeChange
 }: CodexScreenProps) {
   return (
     <section className="workspace-screen codex-screen">
@@ -117,6 +122,7 @@ export function CodexScreen({
         selectedModel={selectedModel}
         effectiveModelId={effectiveModelId}
         reasoningEffort={reasoningEffort}
+        accessMode={accessMode}
         historyPanelOpen={historyPanelOpen}
         draft={draft}
         contextItems={contextItems}
@@ -142,6 +148,7 @@ export function CodexScreen({
         onArchiveThread={onArchiveThread}
         onSelectedModelChange={onSelectedModelChange}
         onReasoningEffortChange={onReasoningEffortChange}
+        onAccessModeChange={onAccessModeChange}
       />
     </section>
   );

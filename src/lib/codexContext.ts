@@ -28,9 +28,26 @@ export function buildCodexPrompt(draft: string, contextItems: CodexContextItem[]
     return normalizedDraft;
   }
 
+  const hasInlineContext = contextItems.some((item) => typeof item.content === "string" && item.content.trim());
   const contextBlock = [
-    "Use these files as context:",
-    ...contextItems.map((item) => `- ${item.path}`)
+    hasInlineContext
+      ? "Use these files as context. Their contents are included inline below."
+      : "Use these files as context:",
+    ...contextItems.flatMap((item) => {
+      const normalizedContent = typeof item.content === "string"
+        ? item.content.replace(/\r\n/g, "\n").trim()
+        : "";
+
+      if (!normalizedContent) {
+        return [`- ${item.path}`];
+      }
+
+      return [
+        `--- BEGIN FILE: ${item.label} (${item.path}) ---`,
+        normalizedContent,
+        `--- END FILE: ${item.label} ---`
+      ];
+    })
   ].join("\n");
 
   if (!normalizedDraft) {
@@ -180,6 +197,8 @@ const loggedReasoningFallbackItemIds = new Set<string>();
 const MAX_REASONING_VISIT_DEPTH = 6;
 const MAX_REASONING_TEXT_PARTS = 48;
 const MAX_REASONING_TEXT_LENGTH = 8_000;
+const MAX_COMMAND_DISPLAY_TEXT_LENGTH = 16_000;
+const TRUNCATED_COMMAND_OUTPUT_NOTICE = "\n\n[output truncated for display]";
 
 function collectReasoningText(
   value: unknown,
@@ -258,6 +277,18 @@ function normalizeReasoningText(parts: string[]) {
   return joined.length > MAX_REASONING_TEXT_LENGTH
     ? `${joined.slice(0, MAX_REASONING_TEXT_LENGTH).trimEnd()}\n...`
     : joined;
+}
+
+function clampConversationEntryText(kind: CodexConversationEntry["kind"], text: string) {
+  if (kind !== "command_execution" && kind !== "file_change") {
+    return text;
+  }
+
+  if (text.length <= MAX_COMMAND_DISPLAY_TEXT_LENGTH) {
+    return text;
+  }
+
+  return `${text.slice(0, MAX_COMMAND_DISPLAY_TEXT_LENGTH).trimEnd()}${TRUNCATED_COMMAND_OUTPUT_NOTICE}`;
 }
 
 function debugReasoningFallback(item: Record<string, unknown>) {
@@ -391,7 +422,10 @@ export function createCodexConversationEntryFromItem(
       meta: typeof record.cwd === "string" ? record.cwd : null,
       phase: null,
       status: typeof record.status === "string" ? record.status : null,
-      text: typeof record.aggregatedOutput === "string" ? record.aggregatedOutput : "",
+      text: clampConversationEntryText(
+        "command_execution",
+        typeof record.aggregatedOutput === "string" ? record.aggregatedOutput : ""
+      ),
       title: typeof record.command === "string" ? record.command : "Command",
       turnId
     };
@@ -405,7 +439,7 @@ export function createCodexConversationEntryFromItem(
       meta: null,
       phase: null,
       status: typeof record.status === "string" ? record.status : null,
-      text: summarizeFileChangeText(record),
+      text: clampConversationEntryText("file_change", summarizeFileChangeText(record)),
       title: "File changes",
       turnId
     };
@@ -564,7 +598,7 @@ export function appendTextToConversationEntry(
 
     return {
       ...entry,
-      text: `${entry.text}${delta}`
+      text: clampConversationEntryText(entry.kind, `${entry.text}${delta}`)
     };
   });
 }

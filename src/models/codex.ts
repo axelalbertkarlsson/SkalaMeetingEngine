@@ -6,6 +6,8 @@ export type CodexSessionStatus =
   | "stopped"
   | "error";
 
+export type CodexAccessMode = "restricted" | "ask" | "full_access";
+
 export interface CodexSessionState {
   connectionId: string | null;
   activeThreadId: string | null;
@@ -22,6 +24,7 @@ export interface CodexContextItem {
   kind: CodexContextItemKind;
   label: string;
   path: string;
+  content?: string | null;
   sourceId: string;
 }
 

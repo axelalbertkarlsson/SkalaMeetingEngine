@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { PaneHeader } from "../components/shell/PaneHeader";
+import { CODEX_ACCESS_OPTIONS, getCodexAccessOption } from "../lib/codexAccess";
 import {
   formatReasoningEffortLabel,
   getCodexModelDisplayName,
@@ -7,7 +8,7 @@ import {
   getCodexReasoningSelectOptions,
   getResolvedCodexModelOption
 } from "../lib/codexModelOptions";
-import type { CodexModelOption, CodexReasoningEffort } from "../models/codex";
+import type { CodexAccessMode, CodexModelOption, CodexReasoningEffort } from "../models/codex";
 import type { Workspace } from "../models/workspace";
 import type { TranscriptionSettings } from "../lib/meetingApi";
 
@@ -20,6 +21,7 @@ interface SettingsScreenProps {
   codexCaptureDebugBundle: boolean;
   codexSelectedModel: string | null;
   codexReasoningEffort: CodexReasoningEffort | null;
+  codexAccessMode: CodexAccessMode;
   codexEffectiveModelId: string | null;
   codexEffectiveReasoningEffort: CodexReasoningEffort | null;
   codexAvailableModels: CodexModelOption[];
@@ -33,6 +35,7 @@ interface SettingsScreenProps {
   onCodexCaptureDebugBundleChange: (value: boolean) => void;
   onCodexSelectedModelChange: (value: string | null) => void;
   onCodexReasoningEffortChange: (value: CodexReasoningEffort | null) => void;
+  onCodexAccessModeChange: (value: CodexAccessMode) => void;
   onDocumentsOpenInNewTabChange: (value: boolean) => void;
   onDocumentsBasePathChange: (value: string) => void;
   onDocumentsEditorFontChange: (value: DocumentsEditorFont) => void;
@@ -54,6 +57,7 @@ export function SettingsScreen({
   codexCaptureDebugBundle,
   codexSelectedModel,
   codexReasoningEffort,
+  codexAccessMode,
   codexEffectiveModelId,
   codexEffectiveReasoningEffort,
   codexAvailableModels,
@@ -67,6 +71,7 @@ export function SettingsScreen({
   onCodexCaptureDebugBundleChange,
   onCodexSelectedModelChange,
   onCodexReasoningEffortChange,
+  onCodexAccessModeChange,
   onDocumentsOpenInNewTabChange,
   onDocumentsBasePathChange,
   onDocumentsEditorFontChange,
@@ -99,6 +104,7 @@ export function SettingsScreen({
     ? getCodexModelDisplayName(codexAvailableModels, codexSelectedModel) ?? codexSelectedModel
     : null;
   const codexEffectiveModelLabel = getCodexModelDisplayName(codexAvailableModels, codexEffectiveModelId);
+  const codexAccessOption = getCodexAccessOption(codexAccessMode);
 
   useEffect(() => {
     setDraftCodexPath(codexCommandPath);
@@ -191,6 +197,7 @@ export function SettingsScreen({
               ? `Default: ${formatReasoningEffortLabel(codexEffectiveReasoningEffort)}`
               : "Default"
         },
+        { label: "Access mode", value: codexAccessOption.label },
         { label: "Transport", value: "JSON-RPC over stdio (JSONL)" },
         { label: "Diagnostics", value: codexCaptureDebugBundle ? "Reserved flag enabled" : "Reserved flag disabled" }
       ]
@@ -395,6 +402,25 @@ export function SettingsScreen({
                 ))}
               </select>
             </label>
+            <label className="meeting-field">
+              <span>Access mode</span>
+              <select
+                className="settings-text-input"
+                title={codexAccessOption.description}
+                value={codexAccessMode}
+                onChange={(event) => onCodexAccessModeChange(event.target.value as CodexAccessMode)}
+              >
+                {CODEX_ACCESS_OPTIONS.map((option) => (
+                  <option
+                    key={option.mode}
+                    value={option.mode}
+                    title={option.description}
+                  >
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
           <p className="muted settings-help-copy">
@@ -405,6 +431,10 @@ export function SettingsScreen({
                   ? `Reasoning options are constrained to ${resolvedCodexModelOption.displayName}. These defaults are shared by the dock and full-page Codex session.`
                   : `Default model currently resolves to ${resolvedCodexModelOption.displayName}. These defaults are shared by the dock and full-page Codex session.`
                 : "Codex has not reported the effective model yet, so reasoning stays constrained to Default. Default model selection still follows your Codex config.toml behavior."}
+          </p>
+
+          <p className="muted settings-help-copy">
+            {codexAccessOption.description}
           </p>
 
           <div className="settings-toggle-row">
