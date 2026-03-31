@@ -8,7 +8,9 @@ import {
   getCodexReasoningSelectOptions,
   getResolvedCodexModelOption
 } from "../../lib/codexModelOptions.js";
+import { CODEX_ACCESS_OPTIONS, getCodexAccessOption } from "../../lib/codexAccess.js";
 import type {
+  CodexAccessMode,
   CodexContextItem,
   CodexConversationEntry,
   CodexModelOption,
@@ -43,6 +45,7 @@ interface CodexWorkbenchProps {
   selectedModel: string | null;
   effectiveModelId: string | null;
   reasoningEffort: CodexReasoningEffort | null;
+  accessMode: CodexAccessMode;
   historyPanelOpen: boolean;
   draft: string;
   contextItems: CodexContextItem[];
@@ -68,6 +71,7 @@ interface CodexWorkbenchProps {
   onArchiveThread: (threadId: string) => void;
   onSelectedModelChange: (value: string | null) => void;
   onReasoningEffortChange: (value: CodexReasoningEffort | null) => void;
+  onAccessModeChange: (value: CodexAccessMode) => void;
 }
 
 function getStatusTone(status: CodexSessionState["status"]) {
@@ -167,6 +171,7 @@ export function CodexWorkbench({
   selectedModel,
   effectiveModelId,
   reasoningEffort,
+  accessMode,
   historyPanelOpen,
   draft,
   contextItems,
@@ -191,7 +196,8 @@ export function CodexWorkbench({
   onRenameThread,
   onArchiveThread,
   onSelectedModelChange,
-  onReasoningEffortChange
+  onReasoningEffortChange,
+  onAccessModeChange
 }: CodexWorkbenchProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -357,6 +363,10 @@ export function CodexWorkbench({
   const selectedReasoningLabel = reasoningEffort
     ? formatReasoningEffortLabel(reasoningEffort)
     : "Default";
+  const selectedAccessOption = useMemo(
+    () => getCodexAccessOption(accessMode),
+    [accessMode]
+  );
 
   const renderSessionControls = (mode: "dock" | "page") => (
     <div className={`codex-session-controls codex-session-controls-${mode}`}>
@@ -402,6 +412,26 @@ export function CodexWorkbench({
               title={option.description ?? undefined}
             >
               {formatReasoningEffortLabel(option.reasoningEffort)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="codex-session-control">
+        <select
+          className="settings-text-input"
+          aria-label="Codex access mode"
+          title={selectedAccessOption.description}
+          value={accessMode}
+          style={{ width: getControlWidth(selectedAccessOption.label, 7, 13) }}
+          onChange={(event) => onAccessModeChange(event.target.value as CodexAccessMode)}
+        >
+          {CODEX_ACCESS_OPTIONS.map((option) => (
+            <option
+              key={option.mode}
+              value={option.mode}
+              title={option.description}
+            >
+              {option.label}
             </option>
           ))}
         </select>

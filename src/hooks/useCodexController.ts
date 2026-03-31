@@ -11,6 +11,12 @@ import {
   type CodexQueuedSend
 } from "../lib/codexContext.js";
 import {
+  appendCodexDiagnosticLog,
+  beginCodexDiagnosticActivity,
+  endCodexDiagnosticActivity,
+  summarizeCodexDiagnosticValue
+} from "../lib/codexDiagnostics.js";
+import {
   archiveCodexThread,
   connectCodexAppServer,
   listCodexModels,
@@ -36,6 +42,7 @@ import {
   sortCodexThreads
 } from "../lib/codexThreads.js";
 import type {
+  CodexAccessMode,
   CodexAppEventPayload,
   CodexContextItem,
   CodexConversationEntry,
@@ -77,6 +84,7 @@ interface UseCodexControllerOptions {
   captureDebugBundle: boolean;
   selectedModel: string | null;
   reasoningEffort: CodexReasoningEffort | null;
+  accessMode: CodexAccessMode;
 }
 
 function isTauriRuntime() {
@@ -132,6 +140,86 @@ function extractThreadId(payload: unknown) {
   }
 
   return null;
+}
+
+function summarizeCodexItemForDiagnostics(item: unknown) {
+  if (!item || typeof item !== "object") {
+    return summarizeCodexDiagnosticValue(item);
+  }
+
+  const record = item as Record<string, unknown>;
+  return {
+    id: typeof record.id === "string" ? record.id : null,
+    type: typeof record.type === "string" ? record.type : null,
+    status: typeof record.status === "string" ? record.status : null,
+    phase: typeof record.phase === "string" ? record.phase : null,
+    title: typeof record.title === "string" ? record.title : null,
+    commandLength: typeof record.command === "string" ? record.command.length : null,
+    aggregatedOutputLength:
+      typeof record.aggregatedOutput === "string" ? record.aggregatedOutput.length : null,
+    summaryLength: Array.isArray(record.summary) ? record.summary.length : null,
+    contentLength: Array.isArray(record.content) ? record.content.length : null,
+    changesLength: Array.isArray(record.changes) ? record.changes.length : null,
+    keys: Object.keys(record).slice(0, 12)
+  };
+}
+
+function summarizeCodexParamsForDiagnostics(params: unknown) {
+  if (!params || typeof params !== "object") {
+    return summarizeCodexDiagnosticValue(params);
+  }
+
+  const record = params as Record<string, unknown>;
+  return {
+    keys: Object.keys(record).slice(0, 12),
+    turnId: typeof record.turnId === "string" ? record.turnId : null,
+    itemId: typeof record.itemId === "string" ? record.itemId : null,
+    deltaLength: typeof record.delta === "string" ? record.delta.length : null,
+    textLength: typeof record.text === "string" ? record.text.length : null,
+    item: "item" in record ? summarizeCodexItemForDiagnostics(record.item) : null
+  };
+}
+
+function summarizeCodexPayloadForDiagnostics(payload: CodexAppEventPayload) {
+  if (payload.kind === "lifecycle") {
+    return {
+      kind: payload.kind,
+      phase: payload.phase,
+      message: payload.message,
+      connectionId: payload.connection_id
+    };
+  }
+
+  if (payload.kind === "stderr") {
+    return {
+      kind: payload.kind,
+      connectionId: payload.connection_id,
+      textLength: payload.text.length
+    };
+  }
+
+  return {
+    kind: payload.kind,
+    method: payload.method,
+    connectionId: payload.connection_id,
+    requestId: payload.kind === "server_request" ? payload.request_id : null,
+    params: summarizeCodexParamsForDiagnostics(payload.params)
+  };
+}
+
+function shouldPersistCodexPayloadDiagnostic(payload: CodexAppEventPayload) {
+  if (payload.kind !== "notification") {
+    return true;
+  }
+
+  return (
+    payload.method === "thread/started"
+    || payload.method === "turn/started"
+    || payload.method === "turn/completed"
+    || payload.method === "error"
+    || payload.method === "item/started"
+    || payload.method === "item/completed"
+  );
 }
 
 const reasoningEffortSet = new Set<CodexReasoningEffort>([
@@ -240,7 +328,8 @@ export function useCodexController({
   commandPath,
   captureDebugBundle: _captureDebugBundle,
   selectedModel,
-  reasoningEffort
+  reasoningEffort,
+  accessMode
 }: UseCodexControllerOptions) {
   const [session, setSession] = useState<CodexSessionState>(createInitialSessionState);
   const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
@@ -278,6 +367,7 @@ export function useCodexController({
 
   const sessionRef = useRef(session);
   const connectPromiseRef = useRef<Promise<string | null> | null>(null);
+  const skippedCommandDeltaCountRef = useRef(0);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -699,7 +789,8 @@ export function useCodexController({
         const rawThread = await startCodexThread({
           connectionId,
           workspacePath: workspaceRoot,
-          model: selectedModel
+          model: selectedModel,
+          accessMode
         });
         activateThreadFromRaw(rawThread);
         await refreshThreads(connectionId);
@@ -713,6 +804,7 @@ export function useCodexController({
       }
     })();
   }, [
+    accessMode,
     activateThreadFromRaw,
     appendConversationEntry,
     refreshThreads,
@@ -730,7 +822,8 @@ export function useCodexController({
           prompt: send.prompt,
           expectedTurnId,
           model: selectedModel,
-          effort: reasoningEffort
+          effort: reasoningEffort,
+          accessMode
         });
         const turnEntries = response.turn ? getCodexConversationEntriesFromTurn(response.turn) : [];
         const hasUserEntry = turnEntries.some((entry) => entry.kind === "user_message");
@@ -768,7 +861,7 @@ export function useCodexController({
         };
       }
     },
-    [appendConversationEntry, reasoningEffort, selectedModel, upsertConversationEntries]
+    [accessMode, appendConversationEntry, reasoningEffort, selectedModel, upsertConversationEntries]
   );
 
   const sendDraft = useCallback(() => {
@@ -793,7 +886,8 @@ export function useCodexController({
           const rawThread = await startCodexThread({
             connectionId,
             workspacePath: workspaceRoot,
-            model: selectedModel
+            model: selectedModel,
+            accessMode
           });
           const details = activateThreadFromRaw(rawThread);
           activeThreadId = details.id;
@@ -829,6 +923,7 @@ export function useCodexController({
       await refreshThreads(connectionId);
     })();
   }, [
+    accessMode,
     activateThreadFromRaw,
     appendConversationEntry,
     contextItems,
@@ -979,192 +1074,257 @@ export function useCodexController({
       try {
         const unlisten = await listen<CodexAppEventPayload>(CODEX_APP_EVENT, (event) => {
           const payload = event.payload;
-          if (
-            sessionRef.current.connectionId
-            && payload.connection_id !== sessionRef.current.connectionId
-          ) {
-            return;
-          }
+          const diagnosticActivityId = beginCodexDiagnosticActivity(
+            "codex.appEvent",
+            "Handling Codex app event.",
+            summarizeCodexPayloadForDiagnostics(payload)
+          );
 
-          if (payload.kind === "lifecycle") {
-            if (payload.phase === "connected") {
+          try {
+            if (shouldPersistCodexPayloadDiagnostic(payload)) {
+              appendCodexDiagnosticLog({
+                scope: "codex.appEvent",
+                message: `${payload.kind}${payload.kind === "notification" || payload.kind === "server_request" ? `:${payload.method}` : ""}`,
+                details: summarizeCodexPayloadForDiagnostics(payload)
+              });
+            }
+
+            if (
+              sessionRef.current.connectionId
+              && payload.connection_id !== sessionRef.current.connectionId
+            ) {
+              return;
+            }
+
+            if (payload.kind === "lifecycle") {
+              if (payload.phase === "connected") {
+                setSession((current) => ({
+                  ...current,
+                  status: "running",
+                  message: payload.message
+                }));
+              } else if (payload.phase === "stopped") {
+                setSession((current) => ({
+                  ...current,
+                  connectionId: null,
+                  activeTurnId: null,
+                  status: "stopped",
+                  message: payload.message
+                }));
+                setPendingUserInputRequest(null);
+              } else {
+                setSession((current) => ({
+                  ...current,
+                  status: "error",
+                  message: payload.message
+                }));
+              }
+              return;
+            }
+
+            if (payload.kind === "stderr") {
+              appendConversationEntry(
+                createCodexEventEntry("Codex stderr", payload.text, {
+                  id: `conversation-stderr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+                })
+              );
+              return;
+            }
+
+            if (payload.kind === "server_request") {
+              if (
+                payload.method === "item/tool/requestUserInput"
+                && payload.params
+                && typeof payload.params === "object"
+              ) {
+                const params = payload.params as Record<string, unknown>;
+                const questions = Array.isArray(params.questions)
+                  ? params.questions
+                      .filter((question): question is PendingUserInputRequest["questions"][number] =>
+                        Boolean(question) && typeof question === "object"
+                      )
+                      .map((question) => ({
+                        header: typeof question.header === "string" ? question.header : "Question",
+                        id: typeof question.id === "string" ? question.id : `question-${Date.now()}`,
+                        question: typeof question.question === "string" ? question.question : "",
+                        options: Array.isArray(question.options)
+                          ? question.options
+                              .filter((option): option is { label: string; description: string } =>
+                                Boolean(option)
+                                && typeof option === "object"
+                                && typeof option.label === "string"
+                                && typeof option.description === "string"
+                              )
+                          : null
+                      }))
+                  : [];
+
+                setPendingUserInputRequest({
+                  requestId: payload.request_id,
+                  itemId: typeof params.itemId === "string" ? params.itemId : "request-user-input",
+                  turnId: typeof params.turnId === "string" ? params.turnId : "",
+                  questions
+                });
+                return;
+              }
+
+              appendConversationEntry(
+                createCodexEventEntry(
+                  "Codex request",
+                  `Received unsupported server request: ${payload.method}`
+                )
+              );
+              return;
+            }
+
+            if (payload.method === "item/commandExecution/outputDelta") {
+              skippedCommandDeltaCountRef.current += 1;
+
+              if (skippedCommandDeltaCountRef.current === 1 || skippedCommandDeltaCountRef.current % 250 === 0) {
+                appendCodexDiagnosticLog({
+                  scope: "codex.appEvent",
+                  message: "Skipped command execution output delta to avoid renderer churn.",
+                  details: {
+                    skippedCount: skippedCommandDeltaCountRef.current,
+                    params: summarizeCodexParamsForDiagnostics(payload.params)
+                  }
+                });
+              }
+
+              return;
+            }
+
+            setSession((current) => {
+              if (current.lastEventMethod === payload.method) {
+                return current;
+              }
+
+              return {
+                ...current,
+                lastEventMethod: payload.method
+              };
+            });
+
+            if (payload.method === "thread/started") {
+              const threadId = extractThreadId(payload.params);
+              if (threadId) {
+                setSession((current) => ({
+                  ...current,
+                  activeThreadId: threadId
+                }));
+              }
+              return;
+            }
+
+            if (payload.method === "turn/started") {
+              const turnId = extractTurnId(payload.params);
+              if (turnId) {
+                setSession((current) => ({
+                  ...current,
+                  activeTurnId: turnId
+                }));
+              }
+              return;
+            }
+
+            if (payload.method === "turn/completed") {
+              skippedCommandDeltaCountRef.current = 0;
+              const turnId = extractTurnId(payload.params);
               setSession((current) => ({
                 ...current,
-                status: "running",
-                message: payload.message
-              }));
-            } else if (payload.phase === "stopped") {
-              setSession((current) => ({
-                ...current,
-                connectionId: null,
-                activeTurnId: null,
-                status: "stopped",
-                message: payload.message
+                activeTurnId:
+                  current.activeTurnId && turnId && current.activeTurnId === turnId
+                    ? null
+                    : current.activeTurnId
               }));
               setPendingUserInputRequest(null);
-            } else {
-              setSession((current) => ({
-                ...current,
-                status: "error",
-                message: payload.message
-              }));
-            }
-            return;
-          }
-
-          if (payload.kind === "stderr") {
-            appendConversationEntry(
-              createCodexEventEntry("Codex stderr", payload.text, {
-                id: `conversation-stderr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-              })
-            );
-            return;
-          }
-
-          if (payload.kind === "server_request") {
-            if (
-              payload.method === "item/tool/requestUserInput"
-              && payload.params
-              && typeof payload.params === "object"
-            ) {
-              const params = payload.params as Record<string, unknown>;
-              const questions = Array.isArray(params.questions)
-                ? params.questions
-                    .filter((question): question is PendingUserInputRequest["questions"][number] =>
-                      Boolean(question) && typeof question === "object"
-                    )
-                    .map((question) => ({
-                      header: typeof question.header === "string" ? question.header : "Question",
-                      id: typeof question.id === "string" ? question.id : `question-${Date.now()}`,
-                      question: typeof question.question === "string" ? question.question : "",
-                      options: Array.isArray(question.options)
-                        ? question.options
-                            .filter((option): option is { label: string; description: string } =>
-                              Boolean(option)
-                              && typeof option === "object"
-                              && typeof option.label === "string"
-                              && typeof option.description === "string"
-                            )
-                        : null
-                    }))
-                : [];
-
-              setPendingUserInputRequest({
-                requestId: payload.request_id,
-                itemId: typeof params.itemId === "string" ? params.itemId : "request-user-input",
-                turnId: typeof params.turnId === "string" ? params.turnId : "",
-                questions
-              });
+              void refreshThreads(sessionRef.current.connectionId);
               return;
             }
 
-            appendConversationEntry(
-              createCodexEventEntry(
-                "Codex request",
-                `Received unsupported server request: ${payload.method}`
-              )
-            );
-            return;
-          }
-
-          setSession((current) => ({
-            ...current,
-            lastEventMethod: payload.method
-          }));
-
-          if (payload.method === "thread/started") {
-            const threadId = extractThreadId(payload.params);
-            if (threadId) {
+            if (payload.method === "error") {
+              skippedCommandDeltaCountRef.current = 0;
+              const params = payload.params as {
+                error?: { message?: string };
+                willRetry?: boolean;
+              } | null;
+              const message = params?.error?.message ?? "Codex turn failed.";
+              appendConversationEntry(
+                createCodexEventEntry(
+                  params?.willRetry ? "Codex retrying" : "Codex error",
+                  message
+                )
+              );
               setSession((current) => ({
                 ...current,
-                activeThreadId: threadId
-              }));
-            }
-            return;
-          }
-
-          if (payload.method === "turn/started") {
-            const turnId = extractTurnId(payload.params);
-            if (turnId) {
-              setSession((current) => ({
-                ...current,
-                activeTurnId: turnId
-              }));
-            }
-            return;
-          }
-
-          if (payload.method === "turn/completed") {
-            const turnId = extractTurnId(payload.params);
-            setSession((current) => ({
-              ...current,
-              activeTurnId:
-                current.activeTurnId && turnId && current.activeTurnId === turnId
-                  ? null
-                  : current.activeTurnId
-            }));
-            setPendingUserInputRequest(null);
-            void refreshThreads(sessionRef.current.connectionId);
-            return;
-          }
-
-          if (payload.method === "error") {
-            const params = payload.params as {
-              error?: { message?: string };
-              willRetry?: boolean;
-            } | null;
-            const message = params?.error?.message ?? "Codex turn failed.";
-            appendConversationEntry(
-              createCodexEventEntry(
-                params?.willRetry ? "Codex retrying" : "Codex error",
                 message
-              )
+              }));
+              return;
+            }
+
+            if (payload.method === "item/started" || payload.method === "item/completed") {
+              if (!payload.params || typeof payload.params !== "object") {
+                return;
+              }
+
+              const params = payload.params as Record<string, unknown>;
+              const item = params.item;
+              if (
+                payload.method === "item/completed"
+                && item
+                && typeof item === "object"
+                && (item as { type?: unknown }).type === "commandExecution"
+              ) {
+                skippedCommandDeltaCountRef.current = 0;
+              }
+
+              const turnId = typeof params.turnId === "string" ? params.turnId : "";
+              const entry = createCodexConversationEntryFromItem(item, turnId);
+              if (!entry) {
+                return;
+              }
+
+              setConversationEntries((current) =>
+                limitConversationEntries(upsertConversationEntry(current, entry))
+              );
+              return;
+            }
+
+            if (
+              payload.method === "item/agentMessage/delta"
+              || payload.method === "item/fileChange/outputDelta"
+            ) {
+              if (!payload.params || typeof payload.params !== "object") {
+                return;
+              }
+
+              const params = payload.params as Record<string, unknown>;
+              const itemId = typeof params.itemId === "string" ? params.itemId : null;
+              const delta = typeof params.delta === "string" ? params.delta : "";
+
+              if (!itemId || !delta) {
+                return;
+              }
+
+              setConversationEntries((current) =>
+                limitConversationEntries(appendTextToConversationEntry(current, itemId, delta))
+              );
+            }
+          } catch (error) {
+            appendCodexDiagnosticLog({
+              level: "error",
+              scope: "codex.appEvent",
+              message: "Codex app event handler failed.",
+              details: {
+                payload: summarizeCodexPayloadForDiagnostics(payload),
+                error
+              }
+            });
+            appendConversationEntry(
+              createCodexEventEntry("Codex listener error", String(error))
             );
-            setSession((current) => ({
-              ...current,
-              message
-            }));
-            return;
-          }
-
-          if (payload.method === "item/started" || payload.method === "item/completed") {
-            if (!payload.params || typeof payload.params !== "object") {
-              return;
-            }
-
-            const params = payload.params as Record<string, unknown>;
-            const turnId = typeof params.turnId === "string" ? params.turnId : "";
-            const entry = createCodexConversationEntryFromItem(params.item, turnId);
-            if (!entry) {
-              return;
-            }
-
-            setConversationEntries((current) =>
-              limitConversationEntries(upsertConversationEntry(current, entry))
-            );
-            return;
-          }
-
-          if (
-            payload.method === "item/agentMessage/delta"
-            || payload.method === "item/commandExecution/outputDelta"
-            || payload.method === "item/fileChange/outputDelta"
-          ) {
-            if (!payload.params || typeof payload.params !== "object") {
-              return;
-            }
-
-            const params = payload.params as Record<string, unknown>;
-            const itemId = typeof params.itemId === "string" ? params.itemId : null;
-            const delta = typeof params.delta === "string" ? params.delta : "";
-
-            if (!itemId || !delta) {
-              return;
-            }
-
-            setConversationEntries((current) =>
-              limitConversationEntries(appendTextToConversationEntry(current, itemId, delta))
-            );
+          } finally {
+            endCodexDiagnosticActivity(diagnosticActivityId);
           }
         });
 
@@ -1175,6 +1335,12 @@ export function useCodexController({
 
         unlistenFns.push(unlisten);
       } catch (error) {
+        appendCodexDiagnosticLog({
+          level: "error",
+          scope: "codex.listener",
+          message: "Failed to attach Codex app listener.",
+          details: { error }
+        });
         appendConversationEntry(
           createCodexEventEntry("Codex listener error", String(error))
         );
