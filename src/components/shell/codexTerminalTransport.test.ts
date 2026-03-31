@@ -381,6 +381,59 @@ export const tests: TerminalHelperTestCase[] = [
     }
   },
   {
+    name: "createCodexConversationEntryFromItem extracts nested reasoning payload text",
+    run() {
+      const reasoningEntry = createCodexConversationEntryFromItem(
+        {
+          id: "reasoning-1",
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Checking source material" }],
+          content: [
+            {
+              type: "reasoning_text",
+              text: { value: "Comparing the server payload against the client parser" }
+            }
+          ]
+        },
+        "turn-1"
+      );
+
+      assert(reasoningEntry?.kind === "event", "expected reasoning items to map into event entries");
+      assert(reasoningEntry?.title === "Reasoning", "expected reasoning items to preserve the reasoning title");
+      assert(
+        reasoningEntry?.text === "Checking source material\n\nComparing the server payload against the client parser",
+        `unexpected reasoning text: ${JSON.stringify(reasoningEntry?.text)}`
+      );
+    }
+  },
+  {
+    name: "createCodexConversationEntryFromItem bounds cyclical reasoning payloads safely",
+    run() {
+      const cyclical: Record<string, unknown> = {
+        id: "reasoning-cycle",
+        type: "reasoning"
+      };
+      cyclical.summary = [{ text: "Top-level summary" }, cyclical];
+      cyclical.content = [{ value: "Nested detail" }];
+
+      const reasoningEntry = createCodexConversationEntryFromItem(cyclical, "turn-1");
+
+      assert(reasoningEntry?.kind === "event", "expected reasoning cycle item to map into an event");
+      assert(
+        reasoningEntry?.text.includes("Top-level summary"),
+        `expected bounded reasoning text to include the summary: ${JSON.stringify(reasoningEntry?.text)}`
+      );
+      assert(
+        reasoningEntry?.text.includes("Nested detail"),
+        `expected bounded reasoning text to include nested detail: ${JSON.stringify(reasoningEntry?.text)}`
+      );
+      assert(
+        reasoningEntry?.text !== "Codex is reasoning about the current turn.",
+        "expected cyclical reasoning payloads to avoid the fallback text"
+      );
+    }
+  },
+  {
     name: "appendTextToConversationEntry appends deltas onto the matching item only",
     run() {
       const updated = appendTextToConversationEntry(
