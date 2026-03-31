@@ -175,23 +175,132 @@ function summarizeFileChangeText(item: Record<string, unknown>) {
     .join("\n");
 }
 
+const REASONING_FALLBACK_TEXT = "Codex is reasoning about the current turn.";
+const loggedReasoningFallbackItemIds = new Set<string>();
+const MAX_REASONING_VISIT_DEPTH = 6;
+const MAX_REASONING_TEXT_PARTS = 48;
+const MAX_REASONING_TEXT_LENGTH = 8_000;
+
+function collectReasoningText(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  depth = 0
+): string[] {
+  if (depth > MAX_REASONING_VISIT_DEPTH) {
+    return [];
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized ? [normalized] : [];
+  }
+
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    value.forEach((entry) => {
+      if (parts.length >= MAX_REASONING_TEXT_PARTS) {
+        return;
+      }
+
+      const nextParts = collectReasoningText(entry, seen, depth + 1);
+      nextParts.forEach((part) => {
+        if (parts.length < MAX_REASONING_TEXT_PARTS) {
+          parts.push(part);
+        }
+      });
+    });
+    return parts;
+  }
+
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  if (seen.has(value as object)) {
+    return [];
+  }
+
+  seen.add(value as object);
+  const record = value as Record<string, unknown>;
+  const preferredKeys = [
+    "text",
+    "value",
+    "summary",
+    "content",
+    "output",
+    "reasoning",
+    "message",
+    "description",
+    "explanation",
+    "details"
+  ];
+
+  for (const key of preferredKeys) {
+    const nextParts = collectReasoningText(record[key], seen, depth + 1);
+    if (nextParts.length > 0) {
+      return nextParts.slice(0, MAX_REASONING_TEXT_PARTS);
+    }
+  }
+
+  return [];
+}
+
+function normalizeReasoningText(parts: string[]) {
+  if (parts.length === 0) {
+    return "";
+  }
+
+  const uniqueParts = Array.from(
+    new Set(parts.map((part) => part.trim()).filter(Boolean))
+  ).slice(0, MAX_REASONING_TEXT_PARTS);
+
+  const joined = uniqueParts.join("\n");
+  return joined.length > MAX_REASONING_TEXT_LENGTH
+    ? `${joined.slice(0, MAX_REASONING_TEXT_LENGTH).trimEnd()}\n...`
+    : joined;
+}
+
+function debugReasoningFallback(item: Record<string, unknown>) {
+  const itemId = typeof item.id === "string" ? item.id : JSON.stringify(Object.keys(item).sort());
+  if (loggedReasoningFallbackItemIds.has(itemId)) {
+    return;
+  }
+
+  loggedReasoningFallbackItemIds.add(itemId);
+  console.debug("[codex] reasoning fallback", {
+    id: item.id ?? null,
+    type: item.type ?? null,
+    keys: Object.keys(item),
+    summaryType: Array.isArray(item.summary) ? "array" : typeof item.summary,
+    contentType: Array.isArray(item.content) ? "array" : typeof item.content,
+    textType: typeof item.text,
+    reasoningType: Array.isArray(item.reasoning) ? "array" : typeof item.reasoning
+  });
+}
+
 function summarizeReasoningText(item: Record<string, unknown>) {
-  const summary = Array.isArray(item.summary) ? item.summary.filter((entry): entry is string => typeof entry === "string") : [];
-  const content = Array.isArray(item.content) ? item.content.filter((entry): entry is string => typeof entry === "string") : [];
+  const summary = normalizeReasoningText(collectReasoningText(item.summary));
+  const content = normalizeReasoningText(collectReasoningText(item.content));
+  const directText = normalizeReasoningText(collectReasoningText(item.text));
 
-  if (summary.length && content.length) {
-    return `${summary.join("\n")}\n\n${content.join("\n")}`;
+  if (summary && content) {
+    return `${summary}\n\n${content}`;
   }
 
-  if (summary.length) {
-    return summary.join("\n");
+  if (summary) {
+    return summary;
   }
 
-  if (content.length) {
-    return content.join("\n");
+  if (content) {
+    return content;
   }
 
-  return "Codex is reasoning about the current turn.";
+  if (directText) {
+    return directText;
+  }
+
+  debugReasoningFallback(item);
+  return REASONING_FALLBACK_TEXT;
 }
 
 function summarizeMcpToolCallText(item: Record<string, unknown>) {
