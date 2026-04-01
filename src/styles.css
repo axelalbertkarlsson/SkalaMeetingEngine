@@ -1820,6 +1820,30 @@ table {
   gap: 10px;
 }
 
+.codex-session-controls-dock {
+  align-items: center;
+}
+
+.codex-session-controls-dock-top,
+.codex-session-controls-dock-bottom {
+  align-items: center;
+}
+
+.codex-session-controls-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+  min-height: 30px;
+}
+
+.codex-session-controls-actions .codex-cursor-inline-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+}
+
 .codex-session-control {
   display: flex;
   position: relative;
@@ -1842,25 +1866,111 @@ table {
   pointer-events: none;
 }
 
-.codex-session-controls .settings-text-input {
+.codex-session-control-trigger {
   width: auto;
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
-  appearance: none;
-  -webkit-appearance: none;
-  border-color: transparent;
-  background: var(--panel-bg-secondary);
+  min-height: 30px;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0 28px 0 10px;
+  text-align: left;
   box-shadow: none;
   cursor: pointer;
-  padding-right: 28px;
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.codex-session-controls .settings-text-input:hover:not(:disabled),
-.codex-session-controls .settings-text-input:focus-visible {
-  background: var(--hover-bg);
+.codex-session-control-trigger-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-session-control-trigger:hover:not(:disabled),
+.codex-session-control-trigger:focus-visible {
+  background: transparent;
   border-color: transparent;
   box-shadow: none;
+  outline: none;
+}
+
+.codex-session-control-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.documents-context-menu.codex-session-control-menu {
+  position: absolute;
+  left: 0;
+  right: auto;
+  z-index: 80;
+  width: max-content;
+  min-width: max-content;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 4px;
+}
+
+.codex-session-control-menu-down {
+  top: calc(100% + 8px);
+}
+
+.codex-session-control-menu-up {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
+.codex-session-control-menu.documents-tree-context-menu {
+  width: max-content;
+  min-width: max-content;
+  padding: 4px;
+  border-radius: 8px;
+}
+
+.codex-session-control-menu .documents-tree-context-menu-item {
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.codex-session-control-menu-indicator {
+  color: var(--accent-color);
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.codex-session-control-menu-indicator-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 10px;
+}
+
+.codex-session-control-menu-indicator-dot::before {
+  content: "";
+  width: 4px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.codex-session-control-menu .documents-context-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.codex-session-control-menu .documents-context-menu-item:disabled:hover {
+  background: transparent;
 }
 
 .codex-cursor-composer-pills,

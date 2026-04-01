@@ -17,6 +17,89 @@ use super::{
 const OPENAI_AUDIO_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const OPENAI_FILE_SIZE_LIMIT_BYTES: u64 = 24 * 1024 * 1024;
+const DEFAULT_TRANSCRIPTION_DURATION_LIMIT_SECONDS: u64 = 1400;
+const DEFAULT_RETRY_CHUNK_DURATION_SECONDS: u64 = 1200;
+const CHUNK_DURATION_MARGIN_SECONDS: u64 = 120;
+const MIN_RETRY_CHUNK_DURATION_SECONDS: u64 = 300;
+
+type TranscriptionRequestResult<T> = std::result::Result<T, TranscriptionRequestError>;
+
+#[derive(Debug)]
+enum TranscriptionRequestError {
+    Provider(OpenAiTranscriptionProviderError),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for TranscriptionRequestError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl std::fmt::Display for TranscriptionRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Provider(error) => write!(f, "{}", error),
+            Self::Other(error) => write!(f, "{}", error),
+        }
+    }
+}
+
+impl TranscriptionRequestError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Provider(error) => anyhow!("{}", error),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OpenAiTranscriptionProviderError {
+    message: String,
+    error_type: Option<String>,
+    code: Option<String>,
+    body: String,
+}
+
+impl OpenAiTranscriptionProviderError {
+    fn parse(body: &str) -> Option<Self> {
+        let payload: Value = serde_json::from_str(body).ok()?;
+        let error = payload.get("error")?;
+        let message = error.get("message").and_then(Value::as_str)?.to_string();
+        let error_type = error
+            .get("type")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+
+        Some(Self {
+            message,
+            error_type,
+            code,
+            body: body.to_string(),
+        })
+    }
+
+    fn is_duration_limit(&self) -> bool {
+        matches!(self.error_type.as_deref(), Some("invalid_request_error"))
+            && matches!(self.code.as_deref(), Some("invalid_value"))
+            && parse_duration_limit_seconds(&self.message).is_some()
+    }
+
+    fn max_duration_seconds(&self) -> Option<f64> {
+        parse_duration_limit_seconds(&self.message)
+    }
+}
+
+impl std::fmt::Display for OpenAiTranscriptionProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OpenAI transcription failed: {}", self.body)
+    }
+}
 
 pub fn enqueue_transcription(workspace_root: PathBuf, run_id: String) {
     std::thread::spawn(move || {
@@ -46,20 +129,30 @@ pub fn run_transcription_pipeline(workspace_root: &Path, run_id: &str) -> Result
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("Run '{}' has no input file to transcribe.", run_id))?;
 
-    let prepared_inputs = prepare_inputs(workspace_root, run_id, &input_path, &settings)?;
-    let mut chunk_responses = Vec::new();
-    let mut chunk_texts = Vec::new();
+    let prepared_inputs = prepare_inputs_for_size(workspace_root, run_id, &input_path, &settings)?;
+    let (chunk_responses, chunk_texts) =
+        match transcribe_prepared_inputs(&client, &prepared_inputs, &settings, &api_key) {
+            Ok(result) => result,
+            Err(TranscriptionRequestError::Provider(error)) if error.is_duration_limit() => {
+                run.progress_label = Some("Splitting long audio for upload".to_string());
+                save_run(&run)?;
 
-    for prepared in &prepared_inputs {
-        let response = transcribe_file(&client, prepared, &settings, &api_key)?;
-        let transcript_text = extract_transcript_text(&response, settings.diarization_enabled)
-            .ok_or_else(|| {
-                anyhow!("OpenAI transcription response did not contain transcript text.")
-            })?;
+                let retry_inputs = prepare_inputs_for_duration_retry(
+                    workspace_root,
+                    run_id,
+                    &input_path,
+                    &settings,
+                    error.max_duration_seconds(),
+                )?;
 
-        chunk_texts.push(transcript_text);
-        chunk_responses.push(response);
-    }
+                run.progress_label = Some("Retrying upload with shorter audio chunks".to_string());
+                save_run(&run)?;
+
+                transcribe_prepared_inputs(&client, &retry_inputs, &settings, &api_key)
+                    .map_err(TranscriptionRequestError::into_anyhow)?
+            }
+            Err(error) => return Err(error.into_anyhow()),
+        };
 
     let raw_transcript = stitch_transcripts(&chunk_texts);
     let artifacts_dir = run_artifacts_dir(workspace_root, run_id);
@@ -134,7 +227,7 @@ fn resolve_api_key(settings: &TranscriptionSettings) -> Result<String> {
         })
 }
 
-fn prepare_inputs(
+fn prepare_inputs_for_size(
     workspace_root: &Path,
     run_id: &str,
     input_path: &Path,
@@ -145,72 +238,68 @@ fn prepare_inputs(
         return Ok(vec![input_path.to_path_buf()]);
     }
 
-    ensure_ffmpeg_available(&settings.ffmpeg_path, input_size)?;
+    ensure_ffmpeg_available_for_size(&settings.ffmpeg_path, input_size)?;
 
     let prepared_dir = run_artifacts_dir(workspace_root, run_id).join("prepared");
     fs::create_dir_all(&prepared_dir)?;
 
     let compressed_path = prepared_dir.join("transcription-input.mp3");
-    let status = Command::new(&settings.ffmpeg_path)
-        .args(["-y", "-i"])
-        .arg(input_path)
-        .args(["-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k"])
-        .arg(&compressed_path)
-        .status()
-        .with_context(|| {
-            format!(
-                "Failed to launch '{}' for audio preprocessing.",
-                settings.ffmpeg_path
-            )
-        })?;
-
-    if !status.success() {
-        return Err(anyhow!(
-            "ffmpeg preprocessing failed for '{}'.",
-            input_path.display()
-        ));
-    }
+    transcode_audio(
+        &settings.ffmpeg_path,
+        input_path,
+        &compressed_path,
+        "audio preprocessing",
+    )?;
 
     if fs::metadata(&compressed_path)?.len() <= OPENAI_FILE_SIZE_LIMIT_BYTES {
         return Ok(vec![compressed_path]);
     }
 
     let chunk_pattern = prepared_dir.join("chunk-%03d.mp3");
-    let status = Command::new(&settings.ffmpeg_path)
-        .args(["-y", "-i"])
-        .arg(&compressed_path)
-        .args(["-f", "segment", "-segment_time", "1800", "-c", "copy"])
-        .arg(&chunk_pattern)
-        .status()
-        .with_context(|| format!("Failed to segment '{}'.", compressed_path.display()))?;
+    segment_audio(
+        &settings.ffmpeg_path,
+        &compressed_path,
+        &chunk_pattern,
+        DEFAULT_RETRY_CHUNK_DURATION_SECONDS,
+        "oversized audio preprocessing",
+    )?;
 
-    if !status.success() {
-        return Err(anyhow!(
-            "ffmpeg segmentation failed for '{}'.",
-            compressed_path.display()
-        ));
-    }
-
-    let mut chunks = fs::read_dir(&prepared_dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .map(|value| value.starts_with("chunk-") && value.ends_with(".mp3"))
-                .unwrap_or(false)
-        })
-        .collect::<Vec<_>>();
-    chunks.sort();
-
-    if chunks.is_empty() {
-        return Err(anyhow!("No chunk files were created during preprocessing."));
-    }
-
-    Ok(chunks)
+    collect_chunk_paths(&prepared_dir, "chunk-")
 }
 
-fn ensure_ffmpeg_available(ffmpeg_path: &str, input_size: u64) -> Result<()> {
+fn prepare_inputs_for_duration_retry(
+    workspace_root: &Path,
+    run_id: &str,
+    input_path: &Path,
+    settings: &TranscriptionSettings,
+    max_duration_seconds: Option<f64>,
+) -> Result<Vec<PathBuf>> {
+    ensure_ffmpeg_available_for_duration_retry(&settings.ffmpeg_path, max_duration_seconds)?;
+
+    let prepared_dir = run_artifacts_dir(workspace_root, run_id).join("prepared");
+    fs::create_dir_all(&prepared_dir)?;
+
+    let compressed_path = prepared_dir.join("duration-retry-input.mp3");
+    transcode_audio(
+        &settings.ffmpeg_path,
+        input_path,
+        &compressed_path,
+        "duration-aware audio preprocessing",
+    )?;
+
+    let chunk_pattern = prepared_dir.join("duration-chunk-%03d.mp3");
+    segment_audio(
+        &settings.ffmpeg_path,
+        &compressed_path,
+        &chunk_pattern,
+        recommended_chunk_duration_seconds(max_duration_seconds),
+        "duration-aware audio chunking",
+    )?;
+
+    collect_chunk_paths(&prepared_dir, "duration-chunk-")
+}
+
+fn ensure_ffmpeg_available_for_size(ffmpeg_path: &str, input_size: u64) -> Result<()> {
     match Command::new(ffmpeg_path).arg("-version").output() {
         Ok(output) if output.status.success() => Ok(()),
         Ok(_) => Err(anyhow!(
@@ -231,15 +320,178 @@ fn ensure_ffmpeg_available(ffmpeg_path: &str, input_size: u64) -> Result<()> {
     }
 }
 
+fn ensure_ffmpeg_available_for_duration_retry(
+    ffmpeg_path: &str,
+    max_duration_seconds: Option<f64>,
+) -> Result<()> {
+    let duration_limit_seconds = normalize_duration_seconds(max_duration_seconds)
+        .unwrap_or(DEFAULT_TRANSCRIPTION_DURATION_LIMIT_SECONDS);
+    match Command::new(ffmpeg_path).arg("-version").output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(_) => Err(anyhow!(
+            "The uploaded audio is longer than the model's {} second limit. FFmpeg is required so the app can split the recording into shorter chunks. Configure a working FFmpeg path in Settings > Transcription.",
+            duration_limit_seconds
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(anyhow!(
+            "The uploaded audio is longer than the model's {} second limit. FFmpeg is not installed or the configured path '{}' is invalid. Install FFmpeg or set its full path in Settings > Transcription.",
+            duration_limit_seconds,
+            ffmpeg_path
+        )),
+        Err(error) => Err(anyhow!(
+            "The uploaded audio is longer than the model's {} second limit. FFmpeg could not be started from '{}': {}",
+            duration_limit_seconds,
+            ffmpeg_path,
+            error
+        )),
+    }
+}
+
+fn transcode_audio(
+    ffmpeg_path: &str,
+    input_path: &Path,
+    output_path: &Path,
+    action: &str,
+) -> Result<()> {
+    let status = Command::new(ffmpeg_path)
+        .args(["-y", "-i"])
+        .arg(input_path)
+        .args(["-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k"])
+        .arg(output_path)
+        .status()
+        .with_context(|| format!("Failed to launch '{}' for {}.", ffmpeg_path, action))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "ffmpeg {} failed for '{}'.",
+            action,
+            input_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn segment_audio(
+    ffmpeg_path: &str,
+    input_path: &Path,
+    chunk_pattern: &Path,
+    segment_time_seconds: u64,
+    action: &str,
+) -> Result<()> {
+    let status = Command::new(ffmpeg_path)
+        .args(["-y", "-i"])
+        .arg(input_path)
+        .args([
+            "-f",
+            "segment",
+            "-segment_time",
+            &segment_time_seconds.to_string(),
+            "-c",
+            "copy",
+        ])
+        .arg(chunk_pattern)
+        .status()
+        .with_context(|| format!("Failed to launch '{}' for {}.", ffmpeg_path, action))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "ffmpeg {} failed for '{}'.",
+            action,
+            input_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn collect_chunk_paths(prepared_dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
+    let mut chunks = fs::read_dir(prepared_dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value.starts_with(prefix) && value.ends_with(".mp3"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    chunks.sort();
+
+    if chunks.is_empty() {
+        return Err(anyhow!("No chunk files were created during preprocessing."));
+    }
+
+    Ok(chunks)
+}
+
+fn normalize_duration_seconds(seconds: Option<f64>) -> Option<u64> {
+    seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.floor() as u64)
+}
+
+fn recommended_chunk_duration_seconds(max_duration_seconds: Option<f64>) -> u64 {
+    let provider_safe_limit = normalize_duration_seconds(max_duration_seconds)
+        .map(|seconds| seconds.saturating_sub(CHUNK_DURATION_MARGIN_SECONDS))
+        .map(|seconds| seconds.max(MIN_RETRY_CHUNK_DURATION_SECONDS));
+
+    provider_safe_limit
+        .unwrap_or(DEFAULT_RETRY_CHUNK_DURATION_SECONDS)
+        .min(DEFAULT_RETRY_CHUNK_DURATION_SECONDS)
+        .max(MIN_RETRY_CHUNK_DURATION_SECONDS)
+}
+
+fn parse_duration_limit_seconds(message: &str) -> Option<f64> {
+    let lowercase = message.to_ascii_lowercase();
+    if !lowercase.contains("audio duration")
+        || !lowercase.contains("is longer than")
+        || !lowercase.contains("maximum for this model")
+    {
+        return None;
+    }
+
+    let after_limit_marker = lowercase.split_once("is longer than")?.1.trim_start();
+    let raw_value = after_limit_marker.split_whitespace().next()?;
+    raw_value
+        .trim_matches(|char: char| !(char.is_ascii_digit() || char == '.'))
+        .parse::<f64>()
+        .ok()
+}
+
 fn format_megabytes(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
 }
+
+fn transcribe_prepared_inputs(
+    client: &Client,
+    prepared_inputs: &[PathBuf],
+    settings: &TranscriptionSettings,
+    api_key: &str,
+) -> TranscriptionRequestResult<(Vec<Value>, Vec<String>)> {
+    let mut chunk_responses = Vec::new();
+    let mut chunk_texts = Vec::new();
+
+    for prepared in prepared_inputs {
+        let response = transcribe_file(client, prepared, settings, api_key)?;
+        let transcript_text = extract_transcript_text(&response, settings.diarization_enabled)
+            .ok_or_else(|| {
+                anyhow!("OpenAI transcription response did not contain transcript text.")
+            })
+            .map_err(TranscriptionRequestError::from)?;
+
+        chunk_texts.push(transcript_text);
+        chunk_responses.push(response);
+    }
+
+    Ok((chunk_responses, chunk_texts))
+}
+
 fn transcribe_file(
     client: &Client,
     file_path: &Path,
     settings: &TranscriptionSettings,
     api_key: &str,
-) -> Result<Value> {
+) -> TranscriptionRequestResult<Value> {
     let model = if settings.diarization_enabled {
         "gpt-4o-transcribe-diarize"
     } else {
@@ -247,7 +499,8 @@ fn transcribe_file(
     };
 
     let file_part = multipart::Part::file(file_path)
-        .with_context(|| format!("Failed to open '{}'.", file_path.display()))?;
+        .with_context(|| format!("Failed to open '{}'.", file_path.display()))
+        .map_err(TranscriptionRequestError::from)?;
     let mut form = multipart::Form::new()
         .part("file", file_part)
         .text("model", model.to_string());
@@ -263,18 +516,28 @@ fn transcribe_file(
         .bearer_auth(api_key)
         .multipart(form)
         .send()
-        .context("OpenAI transcription request failed.")?;
+        .context("OpenAI transcription request failed.")
+        .map_err(TranscriptionRequestError::from)?;
 
     let status = response.status();
     let body = response
         .text()
-        .context("Failed to read OpenAI transcription response.")?;
+        .context("Failed to read OpenAI transcription response.")
+        .map_err(TranscriptionRequestError::from)?;
     if !status.is_success() {
-        return Err(anyhow!("OpenAI transcription failed: {}", body));
+        if let Some(error) = OpenAiTranscriptionProviderError::parse(&body) {
+            return Err(TranscriptionRequestError::Provider(error));
+        }
+
+        return Err(TranscriptionRequestError::Other(anyhow!(
+            "OpenAI transcription failed: {}",
+            body
+        )));
     }
 
-    let parsed: Value =
-        serde_json::from_str(&body).context("Failed to parse OpenAI transcription JSON.")?;
+    let parsed: Value = serde_json::from_str(&body)
+        .context("Failed to parse OpenAI transcription JSON.")
+        .map_err(TranscriptionRequestError::from)?;
     Ok(parsed)
 }
 
@@ -405,7 +668,10 @@ fn extract_output_text(payload: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_prompt, stitch_transcripts};
+    use super::{
+        cleanup_prompt, parse_duration_limit_seconds, recommended_chunk_duration_seconds,
+        stitch_transcripts, OpenAiTranscriptionProviderError,
+    };
 
     #[test]
     fn stitches_chunk_texts_in_order() {
@@ -424,5 +690,37 @@ mod tests {
         assert!(prompt.contains("Do not invent content"));
         assert!(prompt.contains("Preserve speaker labels"));
         assert!(prompt.contains("hello world"));
+    }
+
+    #[test]
+    fn parses_duration_limit_seconds_from_openai_error_message() {
+        let seconds = parse_duration_limit_seconds(
+            "audio duration 2784.96 seconds is longer than 1400 seconds which is the maximum for this model",
+        );
+        assert_eq!(seconds, Some(1400.0));
+    }
+
+    #[test]
+    fn ignores_non_duration_error_messages() {
+        let seconds = parse_duration_limit_seconds("unsupported audio format");
+        assert_eq!(seconds, None);
+    }
+
+    #[test]
+    fn recognizes_duration_limit_provider_errors() {
+        let error = OpenAiTranscriptionProviderError::parse(
+            r#"{"error":{"message":"audio duration 2784.96 seconds is longer than 1400 seconds which is the maximum for this model","type":"invalid_request_error","code":"invalid_value"}}"#,
+        )
+        .expect("provider error should parse");
+
+        assert!(error.is_duration_limit());
+        assert_eq!(error.max_duration_seconds(), Some(1400.0));
+    }
+
+    #[test]
+    fn keeps_retry_chunk_duration_safely_below_provider_limit() {
+        assert_eq!(recommended_chunk_duration_seconds(Some(1400.0)), 1200);
+        assert_eq!(recommended_chunk_duration_seconds(Some(900.0)), 780);
+        assert_eq!(recommended_chunk_duration_seconds(None), 1200);
     }
 }
