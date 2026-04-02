@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -233,6 +233,11 @@ export function CodexWorkbench({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
   const sessionControlsRef = useRef<HTMLDivElement | null>(null);
+  const sessionMenuRefs = useRef<Record<SessionMenuKey, HTMLDivElement | null>>({
+    model: null,
+    reasoning: null,
+    access: null
+  });
   const sessionControlsMeasureRefs = useRef<Record<SessionControlsCompactLevel, HTMLDivElement | null>>({
     0: null,
     1: null,
@@ -242,6 +247,7 @@ export function CodexWorkbench({
   const [requestAnswers, setRequestAnswers] = useState<Record<string, string[]>>({});
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [openSessionMenu, setOpenSessionMenu] = useState<SessionMenuKey | null>(null);
+  const [sessionMenuOffsetX, setSessionMenuOffsetX] = useState(0);
   const [compactSessionControlsLevel, setCompactSessionControlsLevel] = useState<SessionControlsCompactLevel>(0);
 
   useEffect(() => {
@@ -301,6 +307,47 @@ export function CodexWorkbench({
     return () => {
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openSessionMenu]);
+
+  useLayoutEffect(() => {
+    if (!openSessionMenu) {
+      setSessionMenuOffsetX(0);
+      return;
+    }
+
+    const menu = sessionMenuRefs.current[openSessionMenu];
+    if (!menu) {
+      return;
+    }
+
+    const viewportMargin = 12;
+
+    const updateOffset = () => {
+      const nextMenu = sessionMenuRefs.current[openSessionMenu];
+      if (!nextMenu) {
+        return;
+      }
+
+      const rect = nextMenu.getBoundingClientRect();
+      let nextOffset = 0;
+
+      if (rect.right > window.innerWidth - viewportMargin) {
+        nextOffset = window.innerWidth - viewportMargin - rect.right;
+      }
+
+      if (rect.left + nextOffset < viewportMargin) {
+        nextOffset += viewportMargin - (rect.left + nextOffset);
+      }
+
+      setSessionMenuOffsetX((current) => (current === nextOffset ? current : nextOffset));
+    };
+
+    updateOffset();
+    window.addEventListener("resize", updateOffset);
+
+    return () => {
+      window.removeEventListener("resize", updateOffset);
     };
   }, [openSessionMenu]);
 
@@ -577,6 +624,9 @@ export function CodexWorkbench({
       </button>
       {openSessionMenu === menuKey ? (
         <div
+          ref={(node) => {
+            sessionMenuRefs.current[menuKey] = node;
+          }}
           className={
             menuPlacement === "up"
               ? "documents-context-menu documents-tree-context-menu codex-session-control-menu codex-session-control-menu-up"
@@ -584,6 +634,7 @@ export function CodexWorkbench({
           }
           role="menu"
           aria-label={ariaLabel}
+          style={sessionMenuOffsetX ? { transform: `translateX(${sessionMenuOffsetX}px)` } : undefined}
         >
           {options.map((option) => (
             <button
