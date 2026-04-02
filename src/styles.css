@@ -36,6 +36,10 @@
   --font-size-xl: 17px;
   --app-font-family: "Switzer", "IBM Plex Sans", "Segoe UI", sans-serif;
   --documents-editor-font-family: "Switzer", "IBM Plex Sans", "Segoe UI", sans-serif;
+  --scrollbar-size: 10px;
+  --scrollbar-thumb: color-mix(in srgb, var(--text-muted) 38%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--text-muted) 54%, transparent);
+  --scrollbar-thumb-active: color-mix(in srgb, var(--text-muted) 68%, transparent);
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -55,10 +59,48 @@
   --danger-color: #b42318;
   --warning-color: #b7791f;
   --success-color: #166534;
+  --scrollbar-thumb: color-mix(in srgb, var(--text-muted) 28%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--text-muted) 40%, transparent);
+  --scrollbar-thumb-active: color-mix(in srgb, var(--text-muted) 52%, transparent);
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  min-width: 32px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 html,
@@ -1563,11 +1605,32 @@ table {
   border-radius: var(--radius-sm);
   background: var(--panel-bg-tertiary);
   overflow: hidden;
+  --terminal-scrollbar-track: #171b22;
+  --terminal-scrollbar-thumb: rgb(152 164 184 / 0.34);
+  --terminal-scrollbar-thumb-hover: rgb(152 164 184 / 0.48);
+  --terminal-scrollbar-thumb-active: rgb(152 164 184 / 0.62);
 }
 
 .codex-terminal-host .xterm {
   height: 100%;
   padding: 6px;
+}
+
+.codex-terminal-host .xterm .xterm-viewport {
+  background-color: var(--terminal-scrollbar-track);
+  scrollbar-color: var(--terminal-scrollbar-thumb) transparent;
+}
+
+.codex-terminal-host .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: var(--terminal-scrollbar-thumb);
+}
+
+.codex-terminal-host .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background-color: var(--terminal-scrollbar-thumb-hover);
+}
+
+.codex-terminal-host .xterm .xterm-viewport::-webkit-scrollbar-thumb:active {
+  background-color: var(--terminal-scrollbar-thumb-active);
 }
 
 .codex-terminal-host[data-density="dense"] .xterm {
@@ -1826,22 +1889,20 @@ table {
 
 .codex-session-controls-dock-top,
 .codex-session-controls-dock-bottom {
-  align-items: center;
-}
-
-.codex-session-controls-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  width: 100%;
   min-width: 0;
-  margin-left: auto;
-  min-height: 30px;
+  align-items: center;
+  flex-wrap: nowrap;
 }
 
-.codex-session-controls-actions .codex-cursor-inline-action {
-  display: inline-flex;
-  align-items: center;
-  min-height: 30px;
+.codex-session-controls-measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  flex-wrap: nowrap;
+  width: max-content;
+  max-width: none;
+  overflow: hidden;
 }
 
 .codex-session-control {
@@ -1890,6 +1951,34 @@ table {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.codex-session-control-trigger-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.codex-session-control-trigger-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.codex-session-control-compact::after {
+  right: 9px;
+}
+
+.codex-session-control-compact .codex-session-control-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 24px 0 10px;
+}
+
+.codex-session-control-trigger-measure {
+  pointer-events: none;
 }
 
 .codex-session-control-trigger:hover:not(:disabled),
