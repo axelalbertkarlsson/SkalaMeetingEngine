@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -138,6 +138,34 @@ function getControlWidth(label: string, extraChars = 6, minChars = 11) {
 
 type SessionMenuKey = "model" | "reasoning" | "access";
 type SessionControlsLayout = "dock-top" | "dock-bottom" | "page";
+type SessionControlsCompactLevel = 0 | 1 | 2 | 3;
+
+function renderSessionControlIcon(kind: SessionMenuKey) {
+  if (kind === "model") {
+    return (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="10" height="10" rx="2" />
+        <path d="M6 6h4M6 8h4M6 10h2" />
+      </svg>
+    );
+  }
+
+  if (kind === "reasoning") {
+    return (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M8 2.5a4.5 4.5 0 0 0-2.86 7.98c.56.45.86 1.03.86 1.67V13h4v-.85c0-.64.3-1.22.86-1.67A4.5 4.5 0 0 0 8 2.5Z" />
+        <path d="M6.4 13h3.2M6.8 14.5h2.4" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 2.5 12 4v3.55c0 2.05-1.2 3.95-3.08 4.87L8 12.9l-.92-.48A5.43 5.43 0 0 1 4 7.55V4l4-1.5Z" />
+      <path d="m6.6 8 1 1 1.8-2" />
+    </svg>
+  );
+}
 
 function formatThreadMeta(thread: CodexThreadSummary) {
   if (!thread.updatedAt) {
@@ -205,9 +233,22 @@ export function CodexWorkbench({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
   const sessionControlsRef = useRef<HTMLDivElement | null>(null);
+  const sessionMenuRefs = useRef<Record<SessionMenuKey, HTMLDivElement | null>>({
+    model: null,
+    reasoning: null,
+    access: null
+  });
+  const sessionControlsMeasureRefs = useRef<Record<SessionControlsCompactLevel, HTMLDivElement | null>>({
+    0: null,
+    1: null,
+    2: null,
+    3: null
+  });
   const [requestAnswers, setRequestAnswers] = useState<Record<string, string[]>>({});
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [openSessionMenu, setOpenSessionMenu] = useState<SessionMenuKey | null>(null);
+  const [sessionMenuOffsetX, setSessionMenuOffsetX] = useState(0);
+  const [compactSessionControlsLevel, setCompactSessionControlsLevel] = useState<SessionControlsCompactLevel>(0);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -266,6 +307,47 @@ export function CodexWorkbench({
     return () => {
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openSessionMenu]);
+
+  useLayoutEffect(() => {
+    if (!openSessionMenu) {
+      setSessionMenuOffsetX(0);
+      return;
+    }
+
+    const menu = sessionMenuRefs.current[openSessionMenu];
+    if (!menu) {
+      return;
+    }
+
+    const viewportMargin = 12;
+
+    const updateOffset = () => {
+      const nextMenu = sessionMenuRefs.current[openSessionMenu];
+      if (!nextMenu) {
+        return;
+      }
+
+      const rect = nextMenu.getBoundingClientRect();
+      let nextOffset = 0;
+
+      if (rect.right > window.innerWidth - viewportMargin) {
+        nextOffset = window.innerWidth - viewportMargin - rect.right;
+      }
+
+      if (rect.left + nextOffset < viewportMargin) {
+        nextOffset += viewportMargin - (rect.left + nextOffset);
+      }
+
+      setSessionMenuOffsetX((current) => (current === nextOffset ? current : nextOffset));
+    };
+
+    updateOffset();
+    window.addEventListener("resize", updateOffset);
+
+    return () => {
+      window.removeEventListener("resize", updateOffset);
     };
   }, [openSessionMenu]);
 
@@ -399,6 +481,94 @@ export function CodexWorkbench({
     () => getCodexAccessOption(accessMode),
     [accessMode]
   );
+  const useCompactSessionControls = variant === "dock";
+  const compactModelControl = useCompactSessionControls && compactSessionControlsLevel >= 3;
+  const compactReasoningControl = useCompactSessionControls && compactSessionControlsLevel >= 2;
+  const compactAccessControl = useCompactSessionControls && compactSessionControlsLevel >= 1;
+
+  useEffect(() => {
+    const controls = sessionControlsRef.current;
+    const measureEntries = sessionControlsMeasureRefs.current;
+    const measureRows = [
+      measureEntries[0],
+      measureEntries[1],
+      measureEntries[2],
+      measureEntries[3]
+    ];
+    if (!controls || measureRows.some((row) => !row)) {
+      return;
+    }
+
+    let frame = 0;
+    const updateCompactState = () => {
+      cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const availableWidth = controls.clientWidth;
+        const nextLevel = ([0, 1, 2, 3] as SessionControlsCompactLevel[]).find((level) => {
+          const row = measureEntries[level];
+          return row ? Math.ceil(row.getBoundingClientRect().width) <= availableWidth + 1 : false;
+        }) ?? 3;
+        setCompactSessionControlsLevel((current) => (current === nextLevel ? current : nextLevel));
+      });
+    };
+
+    updateCompactState();
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateCompactState();
+    });
+    resizeObserver.observe(controls);
+    measureRows.forEach((row) => {
+      if (row) {
+        resizeObserver.observe(row);
+      }
+    });
+    window.addEventListener("resize", updateCompactState);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateCompactState);
+    };
+  }, [
+    selectedModelLabel,
+    selectedReasoningLabel,
+    selectedAccessOption.label,
+    modelsLoading,
+    reasoningSelectDisabled
+  ]);
+
+  useEffect(() => {
+    if (!useCompactSessionControls) {
+      return;
+    }
+
+    const controls = sessionControlsRef.current;
+    if (!controls) {
+      return;
+    }
+
+    if (controls.scrollWidth <= controls.clientWidth + 1) {
+      return;
+    }
+
+    setCompactSessionControlsLevel((current) => {
+      if (current >= 3) {
+        return current;
+      }
+
+      return (current + 1) as SessionControlsCompactLevel;
+    });
+  }, [
+    compactSessionControlsLevel,
+    compactModelControl,
+    compactReasoningControl,
+    compactAccessControl,
+    selectedModelLabel,
+    selectedReasoningLabel,
+    selectedAccessOption.label,
+    useCompactSessionControls
+  ]);
 
   const renderSessionControlMenu = ({
     menuKey,
@@ -406,6 +576,8 @@ export function CodexWorkbench({
     title,
     width,
     valueLabel,
+    icon,
+    compact = false,
     menuPlacement,
     disabled = false,
     options
@@ -415,6 +587,8 @@ export function CodexWorkbench({
     title: string;
     width: string;
     valueLabel: string;
+    icon: ReactNode;
+    compact?: boolean;
     menuPlacement: "down" | "up";
     disabled?: boolean;
     options: Array<{
@@ -426,7 +600,7 @@ export function CodexWorkbench({
       onSelect: () => void;
     }>;
   }) => (
-    <div className="codex-session-control">
+    <div className={compact ? "codex-session-control codex-session-control-compact" : "codex-session-control"}>
       <button
         type="button"
         className="settings-text-input codex-session-control-trigger"
@@ -434,16 +608,25 @@ export function CodexWorkbench({
         aria-haspopup="menu"
         aria-expanded={openSessionMenu === menuKey}
         title={title}
-        style={{ width }}
+        style={{ width: compact ? "48px" : width }}
         disabled={disabled}
         onClick={() =>
           setOpenSessionMenu((current) => (current === menuKey ? null : menuKey))
         }
       >
-        <span className="codex-session-control-trigger-label">{valueLabel}</span>
+        {compact ? (
+          <span className="codex-session-control-trigger-icon" aria-hidden="true">
+            {icon}
+          </span>
+        ) : (
+          <span className="codex-session-control-trigger-label">{valueLabel}</span>
+        )}
       </button>
       {openSessionMenu === menuKey ? (
         <div
+          ref={(node) => {
+            sessionMenuRefs.current[menuKey] = node;
+          }}
           className={
             menuPlacement === "up"
               ? "documents-context-menu documents-tree-context-menu codex-session-control-menu codex-session-control-menu-up"
@@ -451,6 +634,7 @@ export function CodexWorkbench({
           }
           role="menu"
           aria-label={ariaLabel}
+          style={sessionMenuOffsetX ? { transform: `translateX(${sessionMenuOffsetX}px)` } : undefined}
         >
           {options.map((option) => (
             <button
@@ -482,93 +666,152 @@ export function CodexWorkbench({
     </div>
   );
 
-  const renderSessionControls = (layout: SessionControlsLayout) => (
-    <div
-      ref={sessionControlsRef}
-      className={`codex-session-controls codex-session-controls-${layout}`}
-    >
-      {renderSessionControlMenu({
-        menuKey: "model",
-        ariaLabel: "Codex model",
-        title: "Choose the Codex model",
-        width: getControlWidth(selectedModelLabel),
-        valueLabel: selectedModelLabel,
-        menuPlacement: layout === "dock-bottom" ? "up" : "down",
-        options: [
-          {
-            key: "default",
-            label: "Default",
-            selected: !selectedModel,
-            onSelect: () => onSelectedModelChange(null)
-          },
-          ...(modelsLoading && availableModels.length === 0
-            ? [{
-                key: "loading",
-                label: "Loading available models...",
-                selected: false,
-                disabled: true,
-                onSelect: () => undefined
-              }]
-            : []),
-          ...modelSelectOptions.map((model) => ({
-            key: model.id,
-            label: model.displayName,
-            selected: model.id === selectedModel,
-            onSelect: () => onSelectedModelChange(model.id)
-          }))
-        ]
-      })}
-      {renderSessionControlMenu({
-        menuKey: "reasoning",
-        ariaLabel: "Codex reasoning strength",
-        title: selectedReasoningOption?.description ?? "Choose the reasoning strength",
-        width: getControlWidth(selectedReasoningLabel, 7, 12),
-        valueLabel: selectedReasoningLabel,
-        menuPlacement: layout === "dock-bottom" ? "up" : "down",
-        disabled: reasoningSelectDisabled,
-        options: [
-          {
-            key: "default",
-            label: "Default",
-            selected: !reasoningEffort,
-            onSelect: () => onReasoningEffortChange(null)
-          },
-          ...reasoningSelectOptions.map((option) => ({
-            key: option.reasoningEffort,
-            label: formatReasoningEffortLabel(option.reasoningEffort),
-            description: option.description,
-            selected: option.reasoningEffort === reasoningEffort,
-            onSelect: () => onReasoningEffortChange(option.reasoningEffort)
-          }))
-        ]
-      })}
-      {renderSessionControlMenu({
-        menuKey: "access",
-        ariaLabel: "Codex access mode",
-        title: selectedAccessOption.description,
-        width: getControlWidth(selectedAccessOption.label, 7, 13),
-        valueLabel: selectedAccessOption.label,
-        menuPlacement: layout === "dock-bottom" ? "up" : "down",
-        options: CODEX_ACCESS_OPTIONS.map((option) => ({
-          key: option.mode,
-          label: option.label,
-          description: option.description,
-          selected: option.mode === accessMode,
-          onSelect: () => onAccessModeChange(option.mode as CodexAccessMode)
-        }))
-      })}
-      {layout === "dock-top" || layout === "dock-bottom" ? (
-        <div className="codex-session-controls-actions">
-          <button
-            type="button"
-            className="codex-cursor-inline-action"
-            onClick={onClearConversation}
-          >
-            Clear
-          </button>
-        </div>
-      ) : null}
+  const renderSessionControlMeasurement = ({
+    width,
+    valueLabel,
+    icon,
+    compact = false
+  }: {
+    width: string;
+    valueLabel: string;
+    icon: ReactNode;
+    compact?: boolean;
+  }) => (
+    <div className={compact ? "codex-session-control codex-session-control-compact" : "codex-session-control"}>
+      <span
+        className="settings-text-input codex-session-control-trigger codex-session-control-trigger-measure"
+        style={{ width: compact ? "48px" : width }}
+      >
+        {compact ? (
+          <span className="codex-session-control-trigger-icon" aria-hidden="true">
+            {icon}
+          </span>
+        ) : (
+          <span className="codex-session-control-trigger-label">{valueLabel}</span>
+        )}
+      </span>
     </div>
+  );
+
+  const renderSessionControlsMeasurement = () => (
+    <>
+      {([0, 1, 2, 3] as SessionControlsCompactLevel[]).map((level) => (
+        <div
+          key={level}
+          ref={(node) => {
+            sessionControlsMeasureRefs.current[level] = node;
+          }}
+          className="codex-session-controls codex-session-controls-measure"
+          aria-hidden="true"
+        >
+          {renderSessionControlMeasurement({
+            width: getControlWidth(selectedModelLabel),
+            valueLabel: selectedModelLabel,
+            icon: renderSessionControlIcon("model"),
+            compact: level >= 3
+          })}
+          {renderSessionControlMeasurement({
+            width: getControlWidth(selectedReasoningLabel, 7, 12),
+            valueLabel: selectedReasoningLabel,
+            icon: renderSessionControlIcon("reasoning"),
+            compact: level >= 2
+          })}
+          {renderSessionControlMeasurement({
+            width: getControlWidth(selectedAccessOption.label, 7, 13),
+            valueLabel: selectedAccessOption.label,
+            icon: renderSessionControlIcon("access"),
+            compact: level >= 1
+          })}
+        </div>
+      ))}
+    </>
+  );
+
+  const renderSessionControls = (layout: SessionControlsLayout) => (
+    <>
+      <div
+        ref={sessionControlsRef}
+        className={`codex-session-controls codex-session-controls-${layout}`}
+      >
+        {renderSessionControlMenu({
+          menuKey: "model",
+          ariaLabel: "Codex model",
+          title: `Choose the Codex model. Current: ${selectedModelLabel}`,
+          width: getControlWidth(selectedModelLabel),
+          valueLabel: selectedModelLabel,
+          icon: renderSessionControlIcon("model"),
+          compact: compactModelControl,
+          menuPlacement: layout === "dock-bottom" ? "up" : "down",
+          options: [
+            {
+              key: "default",
+              label: "Default",
+              selected: !selectedModel,
+              onSelect: () => onSelectedModelChange(null)
+            },
+            ...(modelsLoading && availableModels.length === 0
+              ? [{
+                  key: "loading",
+                  label: "Loading available models...",
+                  selected: false,
+                  disabled: true,
+                  onSelect: () => undefined
+                }]
+              : []),
+            ...modelSelectOptions.map((model) => ({
+              key: model.id,
+              label: model.displayName,
+              selected: model.id === selectedModel,
+              onSelect: () => onSelectedModelChange(model.id)
+            }))
+          ]
+        })}
+        {renderSessionControlMenu({
+          menuKey: "reasoning",
+          ariaLabel: "Codex reasoning strength",
+          title: `${selectedReasoningOption?.description ?? "Choose the reasoning strength"}. Current: ${selectedReasoningLabel}`,
+          width: getControlWidth(selectedReasoningLabel, 7, 12),
+          valueLabel: selectedReasoningLabel,
+          icon: renderSessionControlIcon("reasoning"),
+          compact: compactReasoningControl,
+          menuPlacement: layout === "dock-bottom" ? "up" : "down",
+          disabled: reasoningSelectDisabled,
+          options: [
+            {
+              key: "default",
+              label: "Default",
+              selected: !reasoningEffort,
+              onSelect: () => onReasoningEffortChange(null)
+            },
+            ...reasoningSelectOptions.map((option) => ({
+              key: option.reasoningEffort,
+              label: formatReasoningEffortLabel(option.reasoningEffort),
+              description: option.description,
+              selected: option.reasoningEffort === reasoningEffort,
+              onSelect: () => onReasoningEffortChange(option.reasoningEffort)
+            }))
+          ]
+        })}
+        {renderSessionControlMenu({
+          menuKey: "access",
+          ariaLabel: "Codex access mode",
+          title: `${selectedAccessOption.description}. Current: ${selectedAccessOption.label}`,
+          width: getControlWidth(selectedAccessOption.label, 7, 13),
+          valueLabel: selectedAccessOption.label,
+          icon: renderSessionControlIcon("access"),
+          compact: compactAccessControl,
+          menuPlacement: layout === "dock-bottom" ? "up" : "down",
+          options: CODEX_ACCESS_OPTIONS.map((option) => ({
+            key: option.mode,
+            label: option.label,
+            description: option.description,
+            selected: option.mode === accessMode,
+            onSelect: () => onAccessModeChange(option.mode as CodexAccessMode)
+          }))
+        })}
+      </div>
+      {renderSessionControlsMeasurement()}
+    </>
   );
 
   const renderPendingUserInputRequest = () => {
