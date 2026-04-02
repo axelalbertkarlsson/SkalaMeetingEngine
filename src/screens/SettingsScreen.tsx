@@ -289,7 +289,7 @@ export function SettingsScreen({
               Enable speaker diarization when OpenAI supports it for the uploaded audio
             </label>
             <p className="muted settings-help-copy">
-              When enabled, the raw transcript keeps speaker labels and the cleanup pass preserves them. FFmpeg is also required for live recording and for oversized uploads that need preprocessing.
+              When enabled, the raw transcript keeps speaker labels and the cleanup pass preserves them. FFmpeg is also required for live recording and for uploads that need compression or duration-based chunking before transcription.
             </p>
           </div>
 

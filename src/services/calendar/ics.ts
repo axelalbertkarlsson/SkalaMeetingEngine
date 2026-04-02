@@ -13,6 +13,7 @@ import {
   compareLocalParts,
   getDateKey,
   getDateKeyInTimeZone,
+  getLocalPartsInTimeZone,
   getLocalWeekdayCode,
   getUserTimeZone,
   normalizeTimeZone,
@@ -68,6 +69,10 @@ interface ParsedEvent {
 }
 
 const weekdayOrder = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+const MAX_PARSED_EVENTS_PER_SOURCE = 2500;
+const MAX_OCCURRENCES_PER_SOURCE = 2000;
+const MAX_RECURRENCE_ITERATIONS = 800;
+const RECURRENCE_LOOKBACK_INTERVALS = 1;
 
 export function buildEventsFromIcsSnapshot(
   snapshot: CalendarSourceSnapshot,
@@ -88,29 +93,59 @@ export function buildEventsFromIcsSnapshot(
   }
 
   const results: CalendarEventOccurrence[] = [];
+  const appendOccurrences = (occurrences: CalendarEventOccurrence[]) => {
+    if (occurrences.length === 0 || results.length >= MAX_OCCURRENCES_PER_SOURCE) {
+      return;
+    }
+
+    const remainingCapacity = MAX_OCCURRENCES_PER_SOURCE - results.length;
+    if (occurrences.length > remainingCapacity) {
+      console.warn(
+        `[calendar] Truncating rendered occurrences for source '${snapshot.source.name}' at ${MAX_OCCURRENCES_PER_SOURCE} items.`
+      );
+      results.push(...occurrences.slice(0, remainingCapacity));
+      return;
+    }
+
+    results.push(...occurrences);
+  };
 
   for (const event of parsedEvents) {
+    if (results.length >= MAX_OCCURRENCES_PER_SOURCE) {
+      break;
+    }
+
     if (event.recurrenceId) {
       continue;
     }
 
     if (event.recurrence) {
-      results.push(...expandRecurringEvent(event, range, overrides, consumedOverrides));
+      appendOccurrences(expandRecurringEvent(event, range, overrides, consumedOverrides));
       continue;
     }
 
     if (occurrenceOverlapsRange(event.start.date, event.end.date, range)) {
-      results.push(createOccurrence(event, event.start.date, event.end.date, event.start.localKey, false));
+      appendOccurrences([
+        createOccurrence(event, event.start.date, event.end.date, event.start.localKey, false)
+      ]);
     }
   }
 
+  if (results.length >= MAX_OCCURRENCES_PER_SOURCE) {
+    return sortOccurrences(results);
+  }
+
   for (const [overrideKey, override] of overrides.entries()) {
+    if (results.length >= MAX_OCCURRENCES_PER_SOURCE) {
+      break;
+    }
+
     if (consumedOverrides.has(overrideKey)) {
       continue;
     }
 
     if (occurrenceOverlapsRange(override.start.date, override.end.date, range)) {
-      results.push(
+      appendOccurrences([
         createOccurrence(
           override,
           override.start.date,
@@ -118,11 +153,15 @@ export function buildEventsFromIcsSnapshot(
           override.recurrenceId?.localKey ?? override.start.localKey,
           false
         )
-      );
+      ]);
     }
   }
 
-  return results.sort((left, right) => {
+  return sortOccurrences(results);
+}
+
+function sortOccurrences(events: CalendarEventOccurrence[]) {
+  return events.sort((left, right) => {
     const startDiff =
       new Date(left.occurrenceStartAt).getTime() - new Date(right.occurrenceStartAt).getTime();
     if (startDiff !== 0) {
@@ -149,6 +188,12 @@ function parseIcsEvents(snapshot: CalendarSourceSnapshot) {
         const parsed = parseEvent(snapshot, currentProperties);
         if (parsed) {
           events.push(parsed);
+          if (events.length >= MAX_PARSED_EVENTS_PER_SOURCE) {
+            console.warn(
+              `[calendar] Truncating parsed events for source '${snapshot.source.name}' at ${MAX_PARSED_EVENTS_PER_SOURCE} VEVENT entries.`
+            );
+            break;
+          }
         }
       }
       currentProperties = null;
@@ -505,7 +550,7 @@ function expandRecurringEvent(
   const untilTime = rule.until ? new Date(rule.until.iso).getTime() : Number.POSITIVE_INFINITY;
   const maxCount = rule.count ?? Number.POSITIVE_INFINITY;
   let produced = 0;
-  const maxIterations = 800;
+  const startIndex = getRecurrenceStartIndex(event, range);
 
   const pushOccurrence = (candidateParts: LocalDateTimeParts) => {
     if (produced >= maxCount) {
@@ -554,7 +599,11 @@ function expandRecurringEvent(
   };
 
   if (rule.frequency === "daily") {
-    for (let index = 0; index < maxIterations; index += 1) {
+    for (
+      let index = startIndex;
+      index < startIndex + MAX_RECURRENCE_ITERATIONS;
+      index += 1
+    ) {
       const candidateParts = addDaysToLocalParts(event.start.localParts, index * rule.interval);
       if (rule.byDay?.length && !rule.byDay.includes(getLocalWeekdayCode(candidateParts))) {
         continue;
@@ -572,7 +621,11 @@ function expandRecurringEvent(
     const startWeekOffset = weekdayOrder.indexOf(getLocalWeekdayCode(event.start.localParts));
     const weekStart = addDaysToLocalParts(event.start.localParts, -startWeekOffset);
 
-    for (let index = 0; index < maxIterations; index += 1) {
+    for (
+      let index = startIndex;
+      index < startIndex + MAX_RECURRENCE_ITERATIONS;
+      index += 1
+    ) {
       const activeWeekStart = addDaysToLocalParts(weekStart, index * rule.interval * 7);
       for (const weekday of byDay) {
         const candidateBase = addDaysToLocalParts(activeWeekStart, weekdayOrder.indexOf(weekday));
@@ -594,7 +647,11 @@ function expandRecurringEvent(
 
   if (rule.frequency === "monthly") {
     const monthDays = rule.byMonthDay?.length ? rule.byMonthDay : [event.start.localParts.day];
-    for (let index = 0; index < maxIterations; index += 1) {
+    for (
+      let index = startIndex;
+      index < startIndex + MAX_RECURRENCE_ITERATIONS;
+      index += 1
+    ) {
       const monthBase = addMonthsToLocalParts({ ...event.start.localParts, day: 1 }, index * rule.interval);
       for (const monthDay of monthDays) {
         const candidateParts = addDaysToLocalParts({ ...monthBase, hour: event.start.localParts.hour, minute: event.start.localParts.minute, second: event.start.localParts.second }, monthDay - 1);
@@ -612,7 +669,11 @@ function expandRecurringEvent(
   }
 
   if (rule.frequency === "yearly") {
-    for (let index = 0; index < maxIterations; index += 1) {
+    for (
+      let index = startIndex;
+      index < startIndex + MAX_RECURRENCE_ITERATIONS;
+      index += 1
+    ) {
       const candidateParts = addYearsToLocalParts(event.start.localParts, index * rule.interval);
       if (!pushOccurrence(candidateParts)) {
         break;
@@ -621,6 +682,68 @@ function expandRecurringEvent(
   }
 
   return results;
+}
+
+function getRecurrenceStartIndex(event: ParsedEvent, range: CalendarLoadRange) {
+  const rule = event.recurrence;
+  if (!rule?.frequency || rule.count) {
+    return 0;
+  }
+
+  const boundaryDate = new Date(new Date(range.startAt).getTime() - event.durationMs);
+  const boundaryParts = getLocalPartsInTimeZone(boundaryDate, event.timezone);
+
+  if (rule.frequency === "daily") {
+    return Math.max(
+      0,
+      Math.floor(differenceInLocalDays(event.start.localParts, boundaryParts) / rule.interval) -
+        RECURRENCE_LOOKBACK_INTERVALS
+    );
+  }
+
+  if (rule.frequency === "weekly") {
+    const startWeekOffset = weekdayOrder.indexOf(getLocalWeekdayCode(event.start.localParts));
+    const boundaryWeekOffset = weekdayOrder.indexOf(getLocalWeekdayCode(boundaryParts));
+    const startWeek = addDaysToLocalParts(event.start.localParts, -startWeekOffset);
+    const boundaryWeek = addDaysToLocalParts(boundaryParts, -boundaryWeekOffset);
+    return Math.max(
+      0,
+      Math.floor(differenceInLocalDays(startWeek, boundaryWeek) / (rule.interval * 7)) -
+        RECURRENCE_LOOKBACK_INTERVALS
+    );
+  }
+
+  if (rule.frequency === "monthly") {
+    return Math.max(
+      0,
+      Math.floor(differenceInLocalMonths(event.start.localParts, boundaryParts) / rule.interval) -
+        RECURRENCE_LOOKBACK_INTERVALS
+    );
+  }
+
+  if (rule.frequency === "yearly") {
+    return Math.max(
+      0,
+      Math.floor(differenceInLocalYears(event.start.localParts, boundaryParts) / rule.interval) -
+        RECURRENCE_LOOKBACK_INTERVALS
+    );
+  }
+
+  return 0;
+}
+
+function differenceInLocalDays(start: LocalDateTimeParts, end: LocalDateTimeParts) {
+  const startDay = Date.UTC(start.year, start.month - 1, start.day);
+  const endDay = Date.UTC(end.year, end.month - 1, end.day);
+  return Math.floor((endDay - startDay) / (24 * 60 * 60 * 1000));
+}
+
+function differenceInLocalMonths(start: LocalDateTimeParts, end: LocalDateTimeParts) {
+  return (end.year - start.year) * 12 + (end.month - start.month);
+}
+
+function differenceInLocalYears(start: LocalDateTimeParts, end: LocalDateTimeParts) {
+  return end.year - start.year;
 }
 
 function occurrenceOverlapsRange(startDate: Date, endDate: Date, range: CalendarLoadRange) {
