@@ -44,6 +44,10 @@ function getTimeZoneParts(date: Date, timeZone: string) {
   };
 }
 
+export function getLocalPartsInTimeZone(date: Date, timeZone: string): LocalDateTimeParts {
+  return getTimeZoneParts(date, timeZone);
+}
+
 function getTimeZoneOffsetMilliseconds(date: Date, timeZone: string) {
   const parts = getTimeZoneParts(date, timeZone);
   const reconstructedUtc = Date.UTC(

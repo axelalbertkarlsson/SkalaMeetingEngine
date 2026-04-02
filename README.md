@@ -160,7 +160,7 @@ Some areas are still scaffold-level:
 - FFmpeg if you want:
   - microphone recording
   - mixed recording final mixing
-  - preprocessing for large transcription inputs
+  - preprocessing for large or overlong transcription inputs
 - OpenAI API key for transcription
 - Codex CLI installed locally if you want to use the embedded Codex terminal
 
