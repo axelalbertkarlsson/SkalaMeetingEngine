@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -17,7 +18,10 @@ use uuid::Uuid;
 use crate::commands::types::OperationAck;
 
 const CODEX_APP_EVENT: &str = "codex://app-event";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const TURN_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_DYNAMIC_TOOL_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_DYNAMIC_TOOL_OUTPUT_CHARS: usize = 24_000;
 
 #[derive(Clone, Default)]
 pub struct CodexAppServerState {
@@ -58,22 +62,47 @@ impl CodexAppServerState {
 struct CodexAppConnection {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
+    workspace_path: std::path::PathBuf,
     next_request_id: AtomicU64,
     pending_requests: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     active_thread_id: Mutex<Option<String>>,
     active_turn_id: Mutex<Option<String>>,
+    suppressed_command_output_delta_count: AtomicU64,
     exit_emitted: AtomicBool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DynamicToolCallParams {
+    thread_id: String,
+    turn_id: String,
+    call_id: String,
+    tool: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShellCommandToolArgs {
+    command: String,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    login: Option<bool>,
+}
+
 impl CodexAppConnection {
-    fn new(child: Child, stdin: ChildStdin) -> Self {
+    fn new(child: Child, stdin: ChildStdin, workspace_path: std::path::PathBuf) -> Self {
         Self {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
+            workspace_path,
             next_request_id: AtomicU64::new(1),
             pending_requests: Mutex::new(HashMap::new()),
             active_thread_id: Mutex::new(None),
             active_turn_id: Mutex::new(None),
+            suppressed_command_output_delta_count: AtomicU64::new(0),
             exit_emitted: AtomicBool::new(false),
         }
     }
@@ -99,6 +128,21 @@ impl CodexAppConnection {
         if let Ok(mut active_turn_id) = self.active_turn_id.lock() {
             *active_turn_id = turn_id;
         }
+    }
+
+    fn workspace_path(&self) -> &Path {
+        &self.workspace_path
+    }
+
+    fn bump_suppressed_command_output_delta_count(&self) -> u64 {
+        self.suppressed_command_output_delta_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    fn reset_suppressed_command_output_delta_count(&self) -> u64 {
+        self.suppressed_command_output_delta_count
+            .swap(0, Ordering::Relaxed)
     }
 
     fn mark_exit_emitted(&self) -> bool {
@@ -139,20 +183,66 @@ impl CodexAppConnection {
             "method": method,
             "params": params,
         });
+        let timeout = request_timeout_for_method(method);
 
         if let Err(error) = self.write_message(&request) {
             let _ = self.remove_pending_request(request_id);
             return Err(error);
         }
 
-        match rx.recv_timeout(REQUEST_TIMEOUT) {
-            Ok(result) => result,
+        if timeout > DEFAULT_REQUEST_TIMEOUT {
+            append_codex_bridge_log(
+                self.workspace_path(),
+                "codex.app.request",
+                &format!(
+                    "Waiting up to {}s for app-server response to '{}' (request id {}).",
+                    timeout.as_secs(),
+                    method,
+                    request_id
+                ),
+            );
+        }
+
+        match rx.recv_timeout(timeout) {
+            Ok(result) => {
+                if timeout > DEFAULT_REQUEST_TIMEOUT {
+                    append_codex_bridge_log(
+                        self.workspace_path(),
+                        "codex.app.request",
+                        &format!(
+                            "Received app-server response to '{}' (request id {}).",
+                            method,
+                            request_id
+                        ),
+                    );
+                }
+                result
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = self.remove_pending_request(request_id);
+                append_codex_bridge_log(
+                    self.workspace_path(),
+                    "codex.app.request",
+                    &format!(
+                        "Timed out after {}s waiting for app-server response to '{}' (request id {}).",
+                        timeout.as_secs(),
+                        method,
+                        request_id
+                    ),
+                );
                 Err(format!("Timed out waiting for Codex app-server response to '{method}'."))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = self.remove_pending_request(request_id);
+                append_codex_bridge_log(
+                    self.workspace_path(),
+                    "codex.app.request",
+                    &format!(
+                        "App-server disconnected while waiting for '{}' (request id {}).",
+                        method,
+                        request_id
+                    ),
+                );
                 Err("Codex app-server disconnected while waiting for a response.".to_string())
             }
         }
@@ -252,6 +342,7 @@ pub struct CodexAppStartThreadRequest {
     pub connection_id: String,
     pub workspace_path: String,
     pub model: Option<String>,
+    pub access_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +361,7 @@ pub struct CodexAppSendTurnRequest {
     pub expected_turn_id: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub access_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -515,6 +607,57 @@ fn emit_codex_app_event(app: &AppHandle, payload: &CodexAppEventPayload) {
     let _ = app.emit(CODEX_APP_EVENT, payload);
 }
 
+fn codex_bridge_log_path(workspace_path: &Path) -> std::path::PathBuf {
+    workspace_path
+        .join(".skala")
+        .join("logs")
+        .join("codex-app-bridge.log")
+}
+
+fn append_codex_bridge_log(workspace_path: &Path, scope: &str, message: &str) {
+    let log_path = codex_bridge_log_path(workspace_path);
+    if let Some(parent) = log_path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let bounded_message = if message.len() > 1_000 {
+        format!("{}...", &message[..1_000])
+    } else {
+        message.to_string()
+    };
+    let line = format!("{timestamp} [{scope}] {bounded_message}\n");
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn summarize_value_for_log(value: &Value) -> String {
+    let serialized = serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string());
+    if serialized.len() > 600 {
+        format!("{}...", &serialized[..600])
+    } else {
+        serialized
+    }
+}
+
+fn format_child_exit_message(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("Codex app-server stopped with exit code {code}."),
+        None => "Codex app-server stopped.".to_string(),
+    }
+}
+
+fn request_timeout_for_method(method: &str) -> Duration {
+    match method {
+        "turn/start" | "turn/steer" => TURN_REQUEST_TIMEOUT,
+        _ => DEFAULT_REQUEST_TIMEOUT,
+    }
+}
+
 fn parse_request_id(value: &Value) -> Option<u64> {
     value.as_u64()
 }
@@ -545,12 +688,29 @@ fn normalized_non_empty_option(value: Option<&str>) -> Option<String> {
     value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
 }
 
-fn build_thread_start_params(workspace_path: &str, model: Option<&str>) -> Value {
+fn approval_policy_for_access_mode(access_mode: Option<&str>) -> &'static str {
+    match access_mode.map(str::trim) {
+        Some("ask") => "on-request",
+        _ => "never",
+    }
+}
+
+fn sandbox_for_access_mode(access_mode: Option<&str>) -> &'static str {
+    match access_mode.map(str::trim) {
+        Some("full_access") => "danger-full-access",
+        _ => "workspace-write",
+    }
+}
+
+fn build_thread_start_params(workspace_path: &str, model: Option<&str>, access_mode: Option<&str>) -> Value {
     let mut params = Map::new();
-    params.insert("approvalPolicy".to_string(), json!("never"));
+    params.insert(
+        "approvalPolicy".to_string(),
+        json!(approval_policy_for_access_mode(access_mode)),
+    );
     params.insert("cwd".to_string(), json!(workspace_path));
     params.insert("personality".to_string(), json!("pragmatic"));
-    params.insert("sandbox".to_string(), json!("workspace-write"));
+    params.insert("sandbox".to_string(), json!(sandbox_for_access_mode(access_mode)));
     params.insert("serviceName".to_string(), json!("skala_meeting_engine"));
 
     if let Some(model) = normalized_non_empty_option(model) {
@@ -569,6 +729,239 @@ fn build_thread_resume_params(thread_id: &str, model: Option<&str>) -> Value {
     }
 
     Value::Object(params)
+}
+
+fn truncate_dynamic_tool_output(text: String) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= MAX_DYNAMIC_TOOL_OUTPUT_CHARS {
+        return text;
+    }
+
+    let truncated = text
+        .chars()
+        .take(MAX_DYNAMIC_TOOL_OUTPUT_CHARS)
+        .collect::<String>();
+    format!("{truncated}\n\n[output truncated for display]")
+}
+
+fn build_dynamic_tool_text_response(text: String, success: bool) -> Value {
+    json!({
+        "contentItems": [
+            {
+                "type": "inputText",
+                "text": truncate_dynamic_tool_output(text),
+            }
+        ],
+        "success": success,
+    })
+}
+
+fn append_command_section(buffer: &mut String, label: &str, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    if !buffer.is_empty() {
+        buffer.push('\n');
+    }
+
+    buffer.push_str(label);
+    buffer.push_str(":\n");
+    buffer.push_str(text.trim_end());
+    buffer.push('\n');
+}
+
+fn format_wall_time(duration: Duration) -> String {
+    format!("{:.1}", duration.as_secs_f64())
+}
+
+fn read_child_stream(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stream.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn execute_shell_command_tool(
+    connection: &Arc<CodexAppConnection>,
+    tool_call: &DynamicToolCallParams,
+) -> Result<Value, String> {
+    let args: ShellCommandToolArgs = serde_json::from_value(tool_call.arguments.clone())
+        .map_err(|error| format!("Invalid shell_command arguments: {error}"))?;
+    let trimmed_command = args.command.trim();
+    if trimmed_command.is_empty() {
+        return Ok(build_dynamic_tool_text_response(
+            "shell_command failed: command was empty.".to_string(),
+            false,
+        ));
+    }
+
+    let requested_workdir = args
+        .workdir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| connection.workspace_path().to_string_lossy().to_string());
+    let timeout = args
+        .timeout_ms
+        .map(Duration::from_millis)
+        .filter(|duration| !duration.is_zero())
+        .unwrap_or(DEFAULT_DYNAMIC_TOOL_TIMEOUT);
+    let login = args.login.unwrap_or(true);
+
+    let mut process = Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+    process
+        .arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(trimmed_command)
+        .current_dir(&requested_workdir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let start = Instant::now();
+    let mut child = process.spawn().map_err(|error| {
+        format!(
+            "Failed to spawn shell_command '{}' in '{}': {}",
+            trimmed_command, requested_workdir, error
+        )
+    })?;
+
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(read_child_stream)
+        .ok_or_else(|| "shell_command did not expose stdout.".to_string())?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(read_child_stream)
+        .ok_or_else(|| "shell_command did not expose stderr.".to_string())?;
+
+    let mut timed_out = false;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break child
+                        .wait()
+                        .map_err(|error| format!("Failed to wait for timed out shell_command: {error}"))?;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("Failed while waiting for shell_command: {error}"));
+            }
+        }
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "shell_command stdout reader thread panicked.".to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "shell_command stderr reader thread panicked.".to_string())?;
+
+    let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+    let wall_time = format_wall_time(start.elapsed());
+    let exit_code = exit_status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "terminated".to_string());
+
+    let mut output = String::new();
+    output.push_str(&format!("Exit code: {exit_code}\n"));
+    output.push_str(&format!("Wall time: {wall_time} seconds\n"));
+    if timed_out {
+        output.push_str(&format!("Timed out after {} seconds\n", format_wall_time(timeout)));
+    }
+
+    let mut body = String::new();
+    append_command_section(&mut body, "Output", &stdout_text);
+    append_command_section(&mut body, "Errors", &stderr_text);
+    if body.is_empty() {
+        body.push_str("Output:\n");
+    }
+    output.push_str(&body);
+
+    let success = exit_status.success() && !timed_out;
+    append_codex_bridge_log(
+        connection.workspace_path(),
+        "codex.app.dynamic_tool",
+        &format!(
+            "Completed shell_command call '{}' for turn '{}' with success={} exit_code={} login={} workdir='{}' command='{}'.",
+            tool_call.call_id,
+            tool_call.turn_id,
+            success,
+            exit_code,
+            login,
+            requested_workdir,
+            trimmed_command
+        ),
+    );
+
+    Ok(build_dynamic_tool_text_response(output, success))
+}
+
+fn build_unsupported_dynamic_tool_response(tool: &str) -> Value {
+    build_dynamic_tool_text_response(
+        format!("Unsupported dynamic tool call: {tool}"),
+        false,
+    )
+}
+
+fn spawn_dynamic_tool_call_handler(
+    connection: Arc<CodexAppConnection>,
+    workspace_path: std::path::PathBuf,
+    request_id: Value,
+    tool_call: DynamicToolCallParams,
+) {
+    thread::spawn(move || {
+        append_codex_bridge_log(
+            &workspace_path,
+            "codex.app.dynamic_tool",
+            &format!(
+                "Executing dynamic tool call '{}' for tool '{}' on thread '{}' turn '{}'.",
+                tool_call.call_id,
+                tool_call.tool,
+                tool_call.thread_id,
+                tool_call.turn_id
+            ),
+        );
+
+        let result = match tool_call.tool.as_str() {
+            "shell_command" => execute_shell_command_tool(&connection, &tool_call),
+            other => Ok(build_unsupported_dynamic_tool_response(other)),
+        }
+        .unwrap_or_else(|error| build_dynamic_tool_text_response(error, false));
+
+        if let Err(error) = connection.write_message(&json!({
+            "id": request_id,
+            "result": result,
+        })) {
+            append_codex_bridge_log(
+                &workspace_path,
+                "codex.app.dynamic_tool",
+                &format!(
+                    "Failed to send dynamic tool response for call '{}': {}",
+                    tool_call.call_id,
+                    error
+                ),
+            );
+        }
+    });
+}
+
+fn should_emit_server_message_to_renderer(method_name: &str) -> bool {
+    method_name != "item/commandExecution/outputDelta"
 }
 
 fn handle_server_message(
@@ -603,6 +996,80 @@ fn handle_server_message(
     if let Some(method_name) = method {
         let params = value.get("params").cloned().unwrap_or(Value::Null);
 
+        if method_name == "item/tool/call" {
+            let request_id = id.clone().unwrap_or(Value::Null);
+            match serde_json::from_value::<DynamicToolCallParams>(params.clone()) {
+                Ok(tool_call) => {
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.bridge",
+                        &format!(
+                            "Received dynamic tool call request for tool '{}' (call '{}', turn '{}').",
+                            tool_call.tool,
+                            tool_call.call_id,
+                            tool_call.turn_id
+                        ),
+                    );
+                    spawn_dynamic_tool_call_handler(
+                        connection.clone(),
+                        connection.workspace_path().to_path_buf(),
+                        request_id,
+                        tool_call,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.bridge",
+                        &format!(
+                            "Failed to parse dynamic tool call request params: {}",
+                            error
+                        ),
+                    );
+                    let _ = connection.write_message(&json!({
+                        "id": request_id,
+                        "result": build_dynamic_tool_text_response(
+                            format!("Failed to parse dynamic tool call request: {error}"),
+                            false
+                        ),
+                    }));
+                    return;
+                }
+            }
+        }
+
+        if method_name == "item/commandExecution/outputDelta" {
+            let skipped_count = connection.bump_suppressed_command_output_delta_count();
+            if skipped_count == 1 || skipped_count % 250 == 0 {
+                append_codex_bridge_log(
+                    connection.workspace_path(),
+                    "codex.app.bridge",
+                    &format!(
+                        "Suppressed commandExecution output delta #{skipped_count} for connection {connection_id}."
+                    ),
+                );
+            }
+        } else if matches!(
+            method_name.as_str(),
+            "thread/started"
+                | "turn/started"
+                | "turn/completed"
+                | "error"
+                | "item/started"
+                | "item/completed"
+        ) {
+            append_codex_bridge_log(
+                connection.workspace_path(),
+                "codex.app.bridge",
+                &format!(
+                    "Received method '{}' with params {}",
+                    method_name,
+                    summarize_value_for_log(&params)
+                ),
+            );
+        }
+
         match method_name.as_str() {
             "thread/started" => {
                 connection.set_active_thread_id(extract_thread_id_from_value(&params));
@@ -615,8 +1082,38 @@ fn handle_server_message(
                 if completed_turn_id.is_some() {
                     connection.set_active_turn_id(None);
                 }
+                let suppressed_count = connection.reset_suppressed_command_output_delta_count();
+                if suppressed_count > 0 {
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.bridge",
+                        &format!(
+                            "Reset suppressed commandExecution output delta count at turn completion: {suppressed_count}."
+                        ),
+                    );
+                }
             }
             _ => {}
+        }
+
+        if method_name == "item/completed" {
+            let item_type = params.pointer("/item/type").and_then(Value::as_str);
+            if item_type == Some("commandExecution") {
+                let suppressed_count = connection.reset_suppressed_command_output_delta_count();
+                append_codex_bridge_log(
+                    connection.workspace_path(),
+                    "codex.app.bridge",
+                    &format!(
+                        "Completed commandExecution item with suppressed delta count {} and params {}",
+                        suppressed_count,
+                        summarize_value_for_log(&params)
+                    ),
+                );
+            }
+        }
+
+        if !should_emit_server_message_to_renderer(&method_name) {
+            return;
         }
 
         if id.is_some() {
@@ -673,18 +1170,30 @@ fn spawn_stdout_reader(
 
                     match serde_json::from_str::<Value>(&line) {
                         Ok(value) => handle_server_message(&app, &state, &connection_id, &connection, value),
-                        Err(error) => emit_codex_app_event(
-                            &app,
-                            &CodexAppEventPayload::Lifecycle {
-                                connection_id: connection_id.clone(),
-                                phase: CodexAppLifecyclePhase::Error,
-                                message: format!("Failed to parse Codex app-server JSON: {error}"),
-                                thread_id: connection.active_thread_id(),
-                            },
-                        ),
+                        Err(error) => {
+                            append_codex_bridge_log(
+                                connection.workspace_path(),
+                                "codex.app.bridge",
+                                &format!("Failed to parse Codex app-server JSON: {error}. Line: {}", line),
+                            );
+                            emit_codex_app_event(
+                                &app,
+                                &CodexAppEventPayload::Lifecycle {
+                                    connection_id: connection_id.clone(),
+                                    phase: CodexAppLifecyclePhase::Error,
+                                    message: format!("Failed to parse Codex app-server JSON: {error}"),
+                                    thread_id: connection.active_thread_id(),
+                                },
+                            );
+                        }
                     }
                 }
                 Err(error) => {
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.bridge",
+                        &format!("Failed to read Codex app-server stdout: {error}"),
+                    );
                     emit_codex_app_event(
                         &app,
                         &CodexAppEventPayload::Lifecycle {
@@ -703,7 +1212,12 @@ fn spawn_stdout_reader(
     });
 }
 
-fn spawn_stderr_reader(app: AppHandle, connection_id: String, stderr: ChildStderr) {
+fn spawn_stderr_reader(
+    app: AppHandle,
+    connection_id: String,
+    connection: Arc<CodexAppConnection>,
+    stderr: ChildStderr,
+) {
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -713,6 +1227,12 @@ fn spawn_stderr_reader(app: AppHandle, connection_id: String, stderr: ChildStder
                         continue;
                     }
 
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.stderr",
+                        &line,
+                    );
+
                     emit_codex_app_event(
                         &app,
                         &CodexAppEventPayload::Stderr {
@@ -721,9 +1241,61 @@ fn spawn_stderr_reader(app: AppHandle, connection_id: String, stderr: ChildStder
                         },
                     );
                 }
-                Err(_) => break,
+                Err(error) => {
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.bridge",
+                        &format!("Failed to read Codex app-server stderr: {error}"),
+                    );
+                    break;
+                }
             }
         }
+    });
+}
+
+fn spawn_child_exit_watcher(
+    app: AppHandle,
+    state: CodexAppServerState,
+    connection_id: String,
+    connection: Arc<CodexAppConnection>,
+) {
+    thread::spawn(move || loop {
+        if connection.exit_emitted.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let exit_message = {
+            let mut child = match connection.child.lock() {
+                Ok(child) => child,
+                Err(_) => {
+                    append_codex_bridge_log(
+                        connection.workspace_path(),
+                        "codex.app.bridge",
+                        "Child exit watcher could not lock Codex child process.",
+                    );
+                    return;
+                }
+            };
+
+            match child.try_wait() {
+                Ok(Some(status)) => Some(format_child_exit_message(status)),
+                Ok(None) => None,
+                Err(error) => Some(format!("Codex app-server try_wait failed: {error}")),
+            }
+        };
+
+        if let Some(exit_message) = exit_message {
+            append_codex_bridge_log(
+                connection.workspace_path(),
+                "codex.app.bridge",
+                &format!("Child exit watcher observed process exit: {exit_message}"),
+            );
+            finalize_connection_shutdown(&app, &state, &connection_id, &connection);
+            return;
+        }
+
+        thread::sleep(Duration::from_millis(250));
     });
 }
 
@@ -756,15 +1328,18 @@ fn finalize_connection_shutdown(
         };
 
         match child.wait() {
-            Ok(status) => match status.code() {
-                Some(code) => format!("Codex app-server stopped with exit code {code}."),
-                None => "Codex app-server stopped.".to_string(),
-            },
+            Ok(status) => format_child_exit_message(status),
             Err(error) => format!("Codex app-server stopped ({error})."),
         }
     };
 
     let _ = state.remove(connection_id);
+
+    append_codex_bridge_log(
+        connection.workspace_path(),
+        "codex.app.bridge",
+        &format!("Connection finalized: {exit_message}"),
+    );
 
     emit_codex_app_event(
         app,
@@ -798,11 +1373,22 @@ pub fn codex_app_connect(
         .ok_or_else(|| "Codex app-server did not expose stderr.".to_string())?;
 
     let connection_id = format!("codex-app-{}", Uuid::new_v4());
-    let connection = Arc::new(CodexAppConnection::new(child, stdin));
+    let workspace_path = std::path::PathBuf::from(&request.workspace_path);
+    append_codex_bridge_log(
+        &workspace_path,
+        "codex.app.bridge",
+        &format!(
+            "Connecting Codex app-server with command '{}' and workspace '{}'.",
+            request.command,
+            request.workspace_path
+        ),
+    );
+    let connection = Arc::new(CodexAppConnection::new(child, stdin, workspace_path));
 
     state.insert(connection_id.clone(), connection.clone())?;
     spawn_stdout_reader(app.clone(), state.inner().clone(), connection_id.clone(), connection.clone(), stdout);
-    spawn_stderr_reader(app.clone(), connection_id.clone(), stderr);
+    spawn_stderr_reader(app.clone(), connection_id.clone(), connection.clone(), stderr);
+    spawn_child_exit_watcher(app.clone(), state.inner().clone(), connection_id.clone(), connection.clone());
 
     connection.send_request(
         "initialize",
@@ -975,7 +1561,11 @@ pub fn codex_app_start_thread(
 
     let result = connection.send_request(
         "thread/start",
-        build_thread_start_params(&request.workspace_path, request.model.as_deref()),
+        build_thread_start_params(
+            &request.workspace_path,
+            request.model.as_deref(),
+            request.access_mode.as_deref(),
+        ),
     )?;
 
     let thread = result
@@ -1033,6 +1623,7 @@ pub fn codex_app_send_turn(
         connection.send_request(
             "turn/steer",
             json!({
+                "approvalPolicy": approval_policy_for_access_mode(request.access_mode.as_deref()),
                 "expectedTurnId": expected_turn_id,
                 "input": [
                     {
@@ -1040,6 +1631,7 @@ pub fn codex_app_send_turn(
                         "text": request.prompt,
                     }
                 ],
+                "sandbox": sandbox_for_access_mode(request.access_mode.as_deref()),
                 "threadId": thread_id,
             }),
         )?
@@ -1048,7 +1640,10 @@ pub fn codex_app_send_turn(
             "turn/start",
             {
                 let mut params = Map::new();
-                params.insert("approvalPolicy".to_string(), json!("never"));
+                params.insert(
+                    "approvalPolicy".to_string(),
+                    json!(approval_policy_for_access_mode(request.access_mode.as_deref())),
+                );
                 params.insert(
                     "input".to_string(),
                     json!([
@@ -1057,6 +1652,10 @@ pub fn codex_app_send_turn(
                             "text": request.prompt,
                         }
                     ]),
+                );
+                params.insert(
+                    "sandbox".to_string(),
+                    json!(sandbox_for_access_mode(request.access_mode.as_deref())),
                 );
                 params.insert("threadId".to_string(), json!(thread_id));
 
@@ -1140,4 +1739,22 @@ pub fn codex_app_respond_to_server_request(
         ok: true,
         message: "Responded to Codex app-server request.".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_emit_server_message_to_renderer;
+
+    #[test]
+    fn suppresses_command_execution_output_deltas_for_renderer_stability() {
+        assert!(
+            !should_emit_server_message_to_renderer("item/commandExecution/outputDelta")
+        );
+    }
+
+    #[test]
+    fn keeps_other_server_messages_visible_to_renderer() {
+        assert!(should_emit_server_message_to_renderer("item/completed"));
+        assert!(should_emit_server_message_to_renderer("item/agentMessage/delta"));
+    }
 }

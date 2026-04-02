@@ -42,6 +42,13 @@ import {
   type TranscriptionSettings
 } from "./lib/meetingApi";
 import { getResolvedCodexModelOption } from "./lib/codexModelOptions";
+import { getCodexAccessOption } from "./lib/codexAccess";
+import {
+  appendCodexDiagnosticLog,
+  installCodexDiagnosticsDebugHandle,
+  recoverInterruptedCodexDiagnosticActivity,
+  summarizeCodexDiagnosticValue
+} from "./lib/codexDiagnostics.js";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
 import { useCodexController } from "./hooks/useCodexController";
 import {
@@ -53,7 +60,8 @@ import {
   writeDocumentMarkdownToLocalStorage,
   writeDocumentNoteFile
 } from "./services/documentsFileStore";
-import type { CodexReasoningEffort } from "./models/codex";
+import { prepareCodexContextFileForWorkspace } from "./services/codexContextFileStore";
+import type { CodexAccessMode, CodexReasoningEffort } from "./models/codex";
 import type { Artifact, RecordingSource, Run, RunStatus } from "./models/run";
 import { CaptureScreen } from "./screens/CaptureScreen";
 import { CodexScreen } from "./screens/CodexScreen";
@@ -482,7 +490,61 @@ function isActiveRunStatus(status: RunStatus) {
   ].includes(status);
 }
 
+function installGlobalCodexDiagnostics() {
+  installCodexDiagnosticsDebugHandle();
+  recoverInterruptedCodexDiagnosticActivity();
+
+  appendCodexDiagnosticLog({
+    scope: "app.lifecycle",
+    message: "Renderer booted.",
+    details: {
+      path: typeof window !== "undefined" ? window.location.pathname : null
+    }
+  });
+
+  const handleWindowError = (event: ErrorEvent) => {
+    appendCodexDiagnosticLog({
+      level: "error",
+      scope: "window.error",
+      message: event.message || "Unhandled window error.",
+      details: {
+        filename: event.filename || null,
+        lineno: event.lineno,
+        colno: event.colno,
+        error: summarizeCodexDiagnosticValue(event.error)
+      }
+    });
+  };
+
+  const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+    appendCodexDiagnosticLog({
+      level: "error",
+      scope: "window.unhandledrejection",
+      message: "Unhandled promise rejection.",
+      details: {
+        reason: summarizeCodexDiagnosticValue(event.reason)
+      }
+    });
+  };
+
+  window.addEventListener("error", handleWindowError);
+  window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+  return () => {
+    window.removeEventListener("error", handleWindowError);
+    window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+  };
+}
+
 function App() {
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    return installGlobalCodexDiagnostics();
+  }, []);
+
   const workspace = workspaces[0];
 
   const [theme, setTheme] = useLocalStorageState<ThemeMode>("shell.theme", "dark");
@@ -569,6 +631,10 @@ function App() {
     "settings.codex.reasoningEffort",
     null
   );
+  const [codexAccessMode, setCodexAccessMode] = useLocalStorageState<CodexAccessMode>(
+    "settings.codex.accessMode",
+    "restricted"
+  );
   const [documentsOpenInNewTab, setDocumentsOpenInNewTab] = useLocalStorageState<boolean>(
     "settings.documents.openInNewTab",
     true
@@ -638,8 +704,13 @@ function App() {
     commandPath: codexCommandPath,
     captureDebugBundle: codexCaptureDebugBundle,
     selectedModel: codexSelectedModel,
-    reasoningEffort: codexReasoningEffort
+    reasoningEffort: codexReasoningEffort,
+    accessMode: codexAccessMode
   });
+  const selectedCodexAccessOption = useMemo(
+    () => getCodexAccessOption(codexAccessMode),
+    [codexAccessMode]
+  );
   const resolvedCodexModelOption = useMemo(
     () =>
       getResolvedCodexModelOption(
@@ -1702,30 +1773,50 @@ function App() {
           return;
         }
 
+        const preparedFile = await prepareCodexContextFileForWorkspace(
+          workspace.rootPath,
+          resolvedPath
+        );
+        if (!preparedFile) {
+          return;
+        }
+
         codexController.addContextItem({
           id: `codex-document-${item.id}`,
           kind: "document_note",
           label: item.label,
-          path: resolvedPath,
+          path: preparedFile.path,
+          content: preparedFile.content,
           sourceId: item.id
         });
       })();
     },
-    [codexController, documentsBasePath, documentsSidebarItems, openCodexDock]
+    [codexController, documentsBasePath, documentsSidebarItems, openCodexDock, workspace.rootPath]
   );
 
   const handleAddMeetingArtifactToCodex = useCallback(
     (run: Run, artifact: Artifact) => {
-      openCodexDock(true);
-      codexController.addContextItem({
-        id: `codex-artifact-${run.id}-${artifact.id}`,
-        kind: "meeting_artifact",
-        label: `${run.title} - ${artifact.label ?? artifact.kind.replace(/_/g, " ")}`,
-        path: artifact.path,
-        sourceId: artifact.id
-      });
+      void (async () => {
+        openCodexDock(true);
+        const preparedFile = await prepareCodexContextFileForWorkspace(
+          workspace.rootPath,
+          artifact.path
+        );
+        if (!preparedFile) {
+          return;
+        }
+
+        codexController.addContextItem({
+          id: `codex-artifact-${run.id}-${artifact.id}`,
+          kind: "meeting_artifact",
+          label: `${run.title} - ${artifact.label ?? artifact.kind.replace(/_/g, " ")}`,
+          path: preparedFile.path,
+          content: preparedFile.content,
+          sourceId: artifact.id
+        });
+      })();
     },
-    [codexController, openCodexDock]
+    [codexController, openCodexDock, workspace.rootPath]
   );
 
   const inspectorSections = useMemo<InspectorSection[]>(() => {
@@ -1859,6 +1950,7 @@ function App() {
             { label: "Connection", value: codexController.session.connectionId ?? "None" },
             { label: "Thread", value: codexController.session.activeThreadId ?? "None" },
             { label: "Status", value: codexController.session.status },
+            { label: "Access", value: selectedCodexAccessOption.label },
             {
               label: "Active turn",
               value: codexController.session.activeTurnId ?? "Idle"
@@ -2296,6 +2388,7 @@ function App() {
           selectedModel={codexSelectedModel}
           effectiveModelId={codexController.effectiveConfig.model}
           reasoningEffort={codexReasoningEffort}
+          accessMode={codexAccessMode}
           historyPanelOpen={codexController.historyPanelOpen}
           draft={codexController.draft}
           contextItems={codexController.contextItems}
@@ -2323,6 +2416,7 @@ function App() {
           onArchiveThread={codexController.archiveThread}
           onSelectedModelChange={setCodexSelectedModel}
           onReasoningEffortChange={setCodexReasoningEffort}
+          onAccessModeChange={setCodexAccessMode}
         />
       );
     }
@@ -2335,6 +2429,7 @@ function App() {
         codexCaptureDebugBundle={codexCaptureDebugBundle}
         codexSelectedModel={codexSelectedModel}
         codexReasoningEffort={codexReasoningEffort}
+        codexAccessMode={codexAccessMode}
         codexEffectiveModelId={codexController.effectiveConfig.model}
         codexEffectiveReasoningEffort={codexController.effectiveConfig.reasoningEffort}
         codexAvailableModels={codexController.availableModels}
@@ -2348,6 +2443,7 @@ function App() {
         onCodexCaptureDebugBundleChange={setCodexCaptureDebugBundle}
         onCodexSelectedModelChange={setCodexSelectedModel}
         onCodexReasoningEffortChange={setCodexReasoningEffort}
+        onCodexAccessModeChange={setCodexAccessMode}
         onDocumentsOpenInNewTabChange={setDocumentsOpenInNewTab}
         onDocumentsBasePathChange={setDocumentsBasePath}
         onDocumentsEditorFontChange={setDocumentsEditorFont}
@@ -2506,6 +2602,7 @@ function App() {
               selectedModel={codexSelectedModel}
               effectiveModelId={codexController.effectiveConfig.model}
               reasoningEffort={codexReasoningEffort}
+              accessMode={codexAccessMode}
               historyPanelOpen={codexController.historyPanelOpen}
               draft={codexController.draft}
               contextItems={codexController.contextItems}
@@ -2533,6 +2630,7 @@ function App() {
               onArchiveThread={codexController.archiveThread}
               onSelectedModelChange={setCodexSelectedModel}
               onReasoningEffortChange={setCodexReasoningEffort}
+              onAccessModeChange={setCodexAccessMode}
             />
           }
           infoContent={

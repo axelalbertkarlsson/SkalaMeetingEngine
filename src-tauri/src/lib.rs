@@ -50,6 +50,8 @@ pub fn run() {
             commands::documents::documents_delete_note,
             commands::documents::documents_copy_note,
             commands::documents::documents_resolve_note_path,
+            commands::documents::documents_stage_file_for_codex,
+            commands::documents::documents_prepare_file_for_codex,
             commands::spellcheck::spellcheck_load_personal_dictionary,
             commands::spellcheck::spellcheck_add_personal_word,
             commands::spellcheck::spellcheck_remove_personal_word

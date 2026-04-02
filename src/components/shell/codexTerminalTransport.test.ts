@@ -23,6 +23,15 @@ import {
   upsertCodexContextItem
 } from "../../lib/codexContext.js";
 import {
+  appendCodexDiagnosticLog,
+  beginCodexDiagnosticActivity,
+  clearCodexDiagnosticEntries,
+  endCodexDiagnosticActivity,
+  readCodexDiagnosticActiveActivity,
+  readCodexDiagnosticEntries,
+  recoverInterruptedCodexDiagnosticActivity
+} from "../../lib/codexDiagnostics.js";
+import {
   createInitialCodexThreadLocalState,
   extractCodexThreadDetails,
   getCodexConversationEntriesFromTurn,
@@ -76,6 +85,37 @@ function asContextItem(path: string, label = "Context file"): CodexContextItem {
     path,
     sourceId: label
   };
+}
+
+function withMockWindowStorage(run: () => void) {
+  const storage = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  const mockWindow = {
+    localStorage: {
+      getItem(key: string) {
+        return storage.has(key) ? storage.get(key)! : null;
+      },
+      setItem(key: string, value: string) {
+        storage.set(key, value);
+      },
+      removeItem(key: string) {
+        storage.delete(key);
+      }
+    }
+  };
+
+  (globalThis as { window?: unknown }).window = mockWindow;
+
+  try {
+    clearCodexDiagnosticEntries();
+    run();
+  } finally {
+    if (previousWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = previousWindow;
+    }
+  }
 }
 
 export const tests: TerminalHelperTestCase[] = [
@@ -353,6 +393,7 @@ export const tests: TerminalHelperTestCase[] = [
   {
     name: "createCodexConversationEntryFromItem maps agent and command items into feed entries",
     run() {
+      const veryLargeOutput = "A".repeat(20_500);
       const agentEntry = createCodexConversationEntryFromItem(
         {
           id: "agent-1",
@@ -369,7 +410,7 @@ export const tests: TerminalHelperTestCase[] = [
           command: "rg TODO",
           cwd: "C:\\workspace",
           status: "completed",
-          aggregatedOutput: "TODO: fix transcript"
+          aggregatedOutput: veryLargeOutput
         },
         "turn-1"
       );
@@ -378,6 +419,10 @@ export const tests: TerminalHelperTestCase[] = [
       assert(agentEntry?.text === "I reviewed the transcript.", "expected agent text to carry through");
       assert(commandEntry?.kind === "command_execution", "expected a command execution entry");
       assert(commandEntry?.meta === "C:\\workspace", "expected the command cwd to be preserved");
+      assert(
+        commandEntry?.text.endsWith("[output truncated for display]"),
+        "expected very large command output to be capped for display"
+      );
     }
   },
   {
@@ -460,6 +505,34 @@ export const tests: TerminalHelperTestCase[] = [
 
       assert(updated[0]?.text === "Partial answer", "expected the matching entry to receive the delta");
       assert(updated[1]?.text === "Static", "expected non-matching entries to remain unchanged");
+    }
+  },
+  {
+    name: "appendTextToConversationEntry caps large command output deltas for display",
+    run() {
+      const updated = appendTextToConversationEntry(
+        [
+          {
+            id: "conversation-cmd-1",
+            itemId: "cmd-1",
+            kind: "command_execution",
+            title: "Command",
+            text: "B".repeat(15_900),
+            turnId: "turn-1"
+          }
+        ],
+        "cmd-1",
+        "C".repeat(2_000)
+      );
+
+      assert(
+        updated[0]?.text.endsWith("[output truncated for display]"),
+        "expected streamed command output to be capped for display"
+      );
+      assert(
+        (updated[0]?.text.length ?? 0) < 16_200,
+        `expected capped command output to remain bounded, received ${updated[0]?.text.length ?? 0}`
+      );
     }
   },
   {
@@ -602,6 +675,67 @@ export const tests: TerminalHelperTestCase[] = [
       );
 
       assert(sorted[0]?.id === "thread-older", "expected locally reopened thread to sort first");
+    }
+  },
+  {
+    name: "codexDiagnostics recovers interrupted activity into persistent logs",
+    run() {
+      withMockWindowStorage(() => {
+        const activityId = beginCodexDiagnosticActivity("codex.appEvent", "Handling event.", {
+          method: "item/started",
+          itemId: "item-123"
+        });
+        assert(activityId.length > 0, "expected active diagnostic activity id");
+        assert(
+          readCodexDiagnosticActiveActivity()?.id === activityId,
+          "expected active activity to be stored"
+        );
+
+        const recovered = recoverInterruptedCodexDiagnosticActivity();
+        assert(recovered !== null, "expected recovery log entry");
+        assert(
+          readCodexDiagnosticActiveActivity() === null,
+          "expected active activity to clear after recovery"
+        );
+
+        const entries = readCodexDiagnosticEntries();
+        assert(entries.length === 1, `expected one diagnostic log entry, received ${entries.length}`);
+        assert(entries[0]?.level === "warn", `expected warn recovery log, received ${String(entries[0]?.level)}`);
+      });
+    }
+  },
+  {
+    name: "codexDiagnostics bounds large diagnostic payload details",
+    run() {
+      withMockWindowStorage(() => {
+        const oversizedText = "x".repeat(600);
+        appendCodexDiagnosticLog({
+          scope: "window.error",
+          message: "Unhandled window error.",
+          details: {
+            message: oversizedText,
+            nested: [{ value: oversizedText }]
+          }
+        });
+        const entries = readCodexDiagnosticEntries();
+        const detailRecord = entries[0]?.details as { message?: unknown } | null;
+        assert(entries.length === 1, `expected one diagnostic log entry, received ${entries.length}`);
+        assert(
+          detailRecord !== null && typeof detailRecord === "object" && detailRecord !== undefined,
+          "expected diagnostic details object"
+        );
+        assert(
+          typeof detailRecord?.message === "object",
+          `expected bounded string summary object, received ${JSON.stringify(detailRecord?.message)}`
+        );
+
+        const followUpId = beginCodexDiagnosticActivity("codex.appEvent", "Handling event.");
+        endCodexDiagnosticActivity(followUpId);
+        assert(
+          readCodexDiagnosticActiveActivity() === null,
+          "expected explicit activity end to clear active state"
+        );
+      });
     }
   }
 ];
