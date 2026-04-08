@@ -538,38 +538,6 @@ export function CodexWorkbench({
     reasoningSelectDisabled
   ]);
 
-  useEffect(() => {
-    if (!useCompactSessionControls) {
-      return;
-    }
-
-    const controls = sessionControlsRef.current;
-    if (!controls) {
-      return;
-    }
-
-    if (controls.scrollWidth <= controls.clientWidth + 1) {
-      return;
-    }
-
-    setCompactSessionControlsLevel((current) => {
-      if (current >= 3) {
-        return current;
-      }
-
-      return (current + 1) as SessionControlsCompactLevel;
-    });
-  }, [
-    compactSessionControlsLevel,
-    compactModelControl,
-    compactReasoningControl,
-    compactAccessControl,
-    selectedModelLabel,
-    selectedReasoningLabel,
-    selectedAccessOption.label,
-    useCompactSessionControls
-  ]);
-
   const renderSessionControlMenu = ({
     menuKey,
     ariaLabel,
@@ -608,7 +576,7 @@ export function CodexWorkbench({
         aria-haspopup="menu"
         aria-expanded={openSessionMenu === menuKey}
         title={title}
-        style={{ width: compact ? "48px" : width }}
+        style={compact ? { width: "48px" } : (useCompactSessionControls ? undefined : { width })}
         disabled={disabled}
         onClick={() =>
           setOpenSessionMenu((current) => (current === menuKey ? null : menuKey))
@@ -680,7 +648,7 @@ export function CodexWorkbench({
     <div className={compact ? "codex-session-control codex-session-control-compact" : "codex-session-control"}>
       <span
         className="settings-text-input codex-session-control-trigger codex-session-control-trigger-measure"
-        style={{ width: compact ? "48px" : width }}
+        style={compact ? { width: "48px" } : (useCompactSessionControls ? undefined : { width })}
       >
         {compact ? (
           <span className="codex-session-control-trigger-icon" aria-hidden="true">

@@ -3,6 +3,7 @@ import { CalendarAgenda } from "../components/meetings/CalendarAgenda";
 import { CalendarMonthView } from "../components/meetings/CalendarMonthView";
 import { CalendarTimeGrid } from "../components/meetings/CalendarTimeGrid";
 import { MeetingDetailDialog } from "../components/meetings/MeetingDetailDialog";
+import { GearIcon } from "../components/shell/icons";
 import { PaneHeader } from "../components/shell/PaneHeader";
 import { useLocalStorageState } from "../hooks/useLocalStorageState";
 import {
@@ -33,6 +34,8 @@ interface MeetingsScreenProps {
   workspace: Workspace;
   sidebarSelection?: string;
 }
+
+type MeetingsSettingsSection = "sources-subscriptions" | "sources-imports" | "upcoming";
 
 function getVisibleRange(viewMode: CalendarViewMode, anchorDate: Date) {
   if (viewMode === "month") {
@@ -128,8 +131,15 @@ export function MeetingsScreen({ workspace, sidebarSelection }: MeetingsScreenPr
   const [subscriptionUrl, setSubscriptionUrl] = useState("");
   const [importName, setImportName] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+  const [settingsTargetSection, setSettingsTargetSection] = useState<MeetingsSettingsSection | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const settingsPanelRef = useRef<HTMLElement | null>(null);
+  const subscriptionSectionRef = useRef<HTMLDivElement | null>(null);
+  const importSectionRef = useRef<HTMLDivElement | null>(null);
+  const upcomingSectionRef = useRef<HTMLDivElement | null>(null);
 
   const visibleRange = useMemo(() => getVisibleRange(viewMode, anchorDate), [anchorDate, viewMode]);
   const loadRange = useMemo(() => getLoadRange(viewMode, anchorDate), [anchorDate, viewMode]);
@@ -170,7 +180,57 @@ export function MeetingsScreen({ workspace, sidebarSelection }: MeetingsScreenPr
       setSelectedDate(today);
       setAnchorDate(today);
     }
+
+    if (sidebarSelection === "meetings-focus-upcoming") {
+      setSettingsPanelOpen(true);
+      setSettingsTargetSection("upcoming");
+    }
+
+    if (sidebarSelection === "meetings-source-ics") {
+      setSettingsPanelOpen(true);
+      setSettingsTargetSection("sources-subscriptions");
+    }
+
+    if (sidebarSelection === "meetings-source-imports") {
+      setSettingsPanelOpen(true);
+      setSettingsTargetSection("sources-imports");
+    }
   }, [setViewMode, sidebarSelection]);
+
+  useEffect(() => {
+    if (!settingsPanelOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSettingsPanelOpen(false);
+        setSettingsTargetSection(null);
+      }
+    };
+
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+
+      if (settingsPanelRef.current?.contains(target) || settingsButtonRef.current?.contains(target)) {
+        return;
+      }
+
+      setSettingsPanelOpen(false);
+      setSettingsTargetSection(null);
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handleMouseDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handleMouseDown);
+    };
+  }, [settingsPanelOpen]);
 
   const visibleEvents = useMemo(
     () =>
@@ -190,6 +250,29 @@ export function MeetingsScreen({ workspace, sidebarSelection }: MeetingsScreenPr
     () => calendarData?.events.find((event) => event.instanceId === selectedEventId) ?? null,
     [calendarData?.events, selectedEventId]
   );
+
+  useEffect(() => {
+    if (!settingsPanelOpen || !settingsTargetSection) {
+      return;
+    }
+
+    const target =
+      settingsTargetSection === "sources-imports"
+        ? importSectionRef.current
+        : settingsTargetSection === "upcoming"
+          ? upcomingSectionRef.current
+          : subscriptionSectionRef.current;
+
+    if (!target) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [settingsPanelOpen, settingsTargetSection]);
 
   useEffect(() => {
     if (selectedEventId && !calendarData?.events.some((event) => event.instanceId === selectedEventId)) {
@@ -265,6 +348,25 @@ export function MeetingsScreen({ workspace, sidebarSelection }: MeetingsScreenPr
     }
   };
 
+  const openSettingsPanel = useCallback((target: MeetingsSettingsSection = "sources-subscriptions") => {
+    setSettingsPanelOpen(true);
+    setSettingsTargetSection(target);
+  }, []);
+
+  const closeSettingsPanel = useCallback(() => {
+    setSettingsPanelOpen(false);
+    setSettingsTargetSection(null);
+  }, []);
+
+  const toggleSettingsPanel = useCallback(() => {
+    if (settingsPanelOpen) {
+      closeSettingsPanel();
+      return;
+    }
+
+    openSettingsPanel();
+  }, [closeSettingsPanel, openSettingsPanel, settingsPanelOpen]);
+
   return (
     <section className="workspace-screen meetings-calendar-screen">
       <PaneHeader
@@ -306,9 +408,166 @@ export function MeetingsScreen({ workspace, sidebarSelection }: MeetingsScreenPr
             >
               {loading ? "Refreshing..." : "Refresh"}
             </button>
+            <button
+              ref={settingsButtonRef}
+              type="button"
+              className={[
+                "meeting-calendar-toolbar-button",
+                "meeting-calendar-toolbar-button-icon",
+                settingsPanelOpen ? "active" : ""
+              ].join(" ")}
+              aria-label="Open meetings settings"
+              aria-controls="meetings-settings-panel"
+              aria-expanded={settingsPanelOpen}
+              onClick={toggleSettingsPanel}
+            >
+              <GearIcon />
+            </button>
           </div>
         }
       />
+
+      {settingsPanelOpen ? (
+        <div className="meeting-calendar-settings-tray">
+          <section
+            ref={settingsPanelRef}
+            id="meetings-settings-panel"
+            className="meeting-calendar-settings-panel"
+            aria-label="Meetings settings"
+          >
+            <div className="meeting-calendar-settings-panel-header">
+              <div>
+                <p className="pane-eyebrow">Meetings settings</p>
+                <h3 className="meeting-calendar-settings-panel-title">Sources and upcoming</h3>
+                <p className="muted">Manage ICS sources without giving up calendar space.</p>
+              </div>
+              <button type="button" className="meeting-detail-close" onClick={closeSettingsPanel}>
+                Close
+              </button>
+            </div>
+
+            <div className="meeting-calendar-settings-panel-scroll">
+              <section className="meeting-calendar-side-panel meeting-calendar-settings-section">
+                <div className="meeting-calendar-side-panel-header">
+                  <h3 className="block-title">Sources</h3>
+                  <p className="muted">ICS imports and subscriptions feeding the calendar.</p>
+                </div>
+
+                <div className="meeting-calendar-source-list">
+                  {(calendarData?.sources ?? []).map((sourceSnapshot) => (
+                    <article key={sourceSnapshot.source.id} className="meeting-calendar-source-card">
+                      <div className="meeting-calendar-source-copy">
+                        <strong>{sourceSnapshot.source.name}</strong>
+                        <span className="muted">
+                          {sourceSnapshot.source.kind === "ics_subscription" ? "Subscription" : "Imported file"}
+                        </span>
+                        {sourceSnapshot.error ? (
+                          <span className="meeting-calendar-source-state warning">{sourceSnapshot.error}</span>
+                        ) : sourceSnapshot.stale ? (
+                          <span className="meeting-calendar-source-state warning">Using cached data</span>
+                        ) : (
+                          <span className="meeting-calendar-source-state success">
+                            {sourceSnapshot.source.lastSyncedAt
+                              ? `Synced ${new Date(sourceSnapshot.source.lastSyncedAt).toLocaleString()}`
+                              : "Ready"}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="meeting-calendar-toolbar-button danger"
+                        onClick={() => void handleRemoveSource(sourceSnapshot.source.id)}
+                        disabled={busyAction === sourceSnapshot.source.id}
+                      >
+                        Remove
+                      </button>
+                    </article>
+                  ))}
+
+                  {(calendarData?.sources.length ?? 0) === 0 ? (
+                    <p className="muted">
+                      No calendar sources yet. Add an ICS subscription or import a file to populate the Meetings tab.
+                    </p>
+                  ) : null}
+                </div>
+
+                <div ref={subscriptionSectionRef} className="meeting-calendar-settings-target">
+                  <div className="meeting-calendar-source-form">
+                    <h4 className="block-title">Add subscription</h4>
+                    <label className="meeting-field">
+                      <span>Subscription name</span>
+                      <input
+                        className="settings-text-input"
+                        type="text"
+                        value={subscriptionName}
+                        onChange={(event) => setSubscriptionName(event.target.value)}
+                        placeholder="Team calendar"
+                      />
+                    </label>
+                    <label className="meeting-field">
+                      <span>ICS URL</span>
+                      <input
+                        className="settings-text-input"
+                        type="url"
+                        value={subscriptionUrl}
+                        onChange={(event) => setSubscriptionUrl(event.target.value)}
+                        placeholder="https://calendar.example.com/team.ics"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="codex-terminal-button"
+                      onClick={() => void handleAddSubscription()}
+                      disabled={busyAction !== null || !subscriptionUrl.trim()}
+                    >
+                      {busyAction === "subscription" ? "Adding..." : "Add subscription"}
+                    </button>
+                  </div>
+                </div>
+
+                <div ref={importSectionRef} className="meeting-calendar-settings-target">
+                  <div className="meeting-calendar-source-form">
+                    <h4 className="block-title">Import calendar</h4>
+                    <label className="meeting-field">
+                      <span>Import label</span>
+                      <input
+                        className="settings-text-input"
+                        type="text"
+                        value={importName}
+                        onChange={(event) => setImportName(event.target.value)}
+                        placeholder="Personal calendar"
+                      />
+                    </label>
+                    <label className="meeting-file-button">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".ics,text/calendar"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) {
+                            void handleImportCalendarFile(file);
+                          }
+                        }}
+                        disabled={busyAction !== null}
+                      />
+                      <span>{busyAction === "import" ? "Importing..." : "Import .ics file"}</span>
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <div ref={upcomingSectionRef} className="meeting-calendar-settings-target">
+                <CalendarAgenda
+                  events={upcomingEvents}
+                  selectedEventId={selectedEventId}
+                  onSelectEvent={handleSelectEvent}
+                />
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       <article className="pane-block meeting-calendar-toolbar-block">
         <div className="meeting-calendar-toolbar-main">
@@ -361,116 +620,6 @@ export function MeetingsScreen({ workspace, sidebarSelection }: MeetingsScreenPr
             />
           )}
         </div>
-
-        <aside className="meeting-calendar-sidebar">
-          <section className="meeting-calendar-side-panel">
-            <div className="meeting-calendar-side-panel-header">
-              <h3 className="block-title">Sources</h3>
-              <p className="muted">ICS imports and subscriptions feeding the calendar.</p>
-            </div>
-
-            <div className="meeting-calendar-source-list">
-              {(calendarData?.sources ?? []).map((sourceSnapshot) => (
-                <article key={sourceSnapshot.source.id} className="meeting-calendar-source-card">
-                  <div className="meeting-calendar-source-copy">
-                    <strong>{sourceSnapshot.source.name}</strong>
-                    <span className="muted">
-                      {sourceSnapshot.source.kind === "ics_subscription" ? "Subscription" : "Imported file"}
-                    </span>
-                    {sourceSnapshot.error ? (
-                      <span className="meeting-calendar-source-state warning">{sourceSnapshot.error}</span>
-                    ) : sourceSnapshot.stale ? (
-                      <span className="meeting-calendar-source-state warning">Using cached data</span>
-                    ) : (
-                      <span className="meeting-calendar-source-state success">
-                        {sourceSnapshot.source.lastSyncedAt
-                          ? `Synced ${new Date(sourceSnapshot.source.lastSyncedAt).toLocaleString()}`
-                          : "Ready"}
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    className="meeting-calendar-toolbar-button danger"
-                    onClick={() => void handleRemoveSource(sourceSnapshot.source.id)}
-                    disabled={busyAction === sourceSnapshot.source.id}
-                  >
-                    Remove
-                  </button>
-                </article>
-              ))}
-
-              {(calendarData?.sources.length ?? 0) === 0 ? (
-                <p className="muted">No calendar sources yet. Add an ICS subscription or import a file to populate the Meetings tab.</p>
-              ) : null}
-            </div>
-
-            <div className="meeting-calendar-source-form">
-              <label className="meeting-field">
-                <span>Subscription name</span>
-                <input
-                  className="settings-text-input"
-                  type="text"
-                  value={subscriptionName}
-                  onChange={(event) => setSubscriptionName(event.target.value)}
-                  placeholder="Team calendar"
-                />
-              </label>
-              <label className="meeting-field">
-                <span>ICS URL</span>
-                <input
-                  className="settings-text-input"
-                  type="url"
-                  value={subscriptionUrl}
-                  onChange={(event) => setSubscriptionUrl(event.target.value)}
-                  placeholder="https://calendar.example.com/team.ics"
-                />
-              </label>
-              <button
-                type="button"
-                className="codex-terminal-button"
-                onClick={() => void handleAddSubscription()}
-                disabled={busyAction !== null || !subscriptionUrl.trim()}
-              >
-                {busyAction === "subscription" ? "Adding..." : "Add subscription"}
-              </button>
-            </div>
-
-            <div className="meeting-calendar-source-form">
-              <label className="meeting-field">
-                <span>Import label</span>
-                <input
-                  className="settings-text-input"
-                  type="text"
-                  value={importName}
-                  onChange={(event) => setImportName(event.target.value)}
-                  placeholder="Personal calendar"
-                />
-              </label>
-              <label className="meeting-file-button">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".ics,text/calendar"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      void handleImportCalendarFile(file);
-                    }
-                  }}
-                  disabled={busyAction !== null}
-                />
-                <span>{busyAction === "import" ? "Importing..." : "Import .ics file"}</span>
-              </label>
-            </div>
-          </section>
-
-          <CalendarAgenda
-            events={upcomingEvents}
-            selectedEventId={selectedEventId}
-            onSelectEvent={handleSelectEvent}
-          />
-        </aside>
       </div>
 
       <MeetingDetailDialog event={selectedEvent} onClose={() => setSelectedEventId(null)} />
