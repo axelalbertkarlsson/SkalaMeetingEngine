@@ -15,7 +15,7 @@ export function RightDock({
 }: RightDockProps) {
   return (
     <div className="right-dock">
-      <div className="right-dock-content">
+      <div className={activeTabId === "codex" ? "right-dock-content right-dock-content-codex" : "right-dock-content"}>
         {activeTabId === "codex" ? codexContent : infoContent}
       </div>
     </div>
