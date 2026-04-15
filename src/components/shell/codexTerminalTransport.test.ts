@@ -9,6 +9,7 @@ import {
   getTerminalResizeDelayMs,
   getTerminalWriteFlushDelayMs,
   getTerminalVisualResetReason,
+  MAX_SYNC_OUTPUT_BUFFER_BYTES,
   shouldDeferTerminalResize,
   shouldForceTerminalResize,
   type TerminalQueuedWrite
@@ -201,6 +202,40 @@ export const tests: TerminalHelperTestCase[] = [
       assert(update.ready.length === 2, `expected buffered sync bytes and trailing bytes, received ${update.ready.length}`);
       assert(asText(update.ready[0] ?? new Uint8Array()) === "BC", "expected buffered sync body to flush once");
       assert(asText(update.ready[1] ?? new Uint8Array()) === "D", "expected trailing bytes after sync mode to remain visible");
+    }
+  },
+  {
+    name: "consumeTerminalSyncOutput caps synchronized buffering and flushes in bounded chunks",
+    run() {
+      const start = "\u001b[?2026h";
+      const end = "\u001b[?2026l";
+      let state = createTerminalSyncOutputState();
+
+      const startUpdate = consumeTerminalSyncOutput(state, asBytes(start));
+      state = startUpdate.state;
+      assert(state.active, "expected sync mode to be active after the start marker");
+
+      const oversizedBody = new Uint8Array(MAX_SYNC_OUTPUT_BUFFER_BYTES + 64).fill("X".charCodeAt(0));
+      const bodyUpdate = consumeTerminalSyncOutput(state, oversizedBody);
+      state = bodyUpdate.state;
+      assert(state.active, "expected sync mode to remain active before the end marker");
+      assert(
+        state.bufferedLength <= MAX_SYNC_OUTPUT_BUFFER_BYTES,
+        `expected buffered length to stay within cap, received ${state.bufferedLength}`
+      );
+      assert(bodyUpdate.ready.length === 1, `expected one bounded flush chunk, received ${bodyUpdate.ready.length}`);
+      assert(
+        bodyUpdate.ready[0]?.length === MAX_SYNC_OUTPUT_BUFFER_BYTES,
+        `expected bounded flush chunk size ${MAX_SYNC_OUTPUT_BUFFER_BYTES}, received ${String(bodyUpdate.ready[0]?.length)}`
+      );
+
+      const endUpdate = consumeTerminalSyncOutput(state, asBytes(end));
+      assert(!endUpdate.state.active, "expected sync mode to close after the end marker");
+      assert(endUpdate.ready.length === 1, `expected remaining bytes to flush on end marker, received ${endUpdate.ready.length}`);
+      assert(
+        endUpdate.ready[0]?.length === 64,
+        `expected trailing buffered bytes to flush after end marker, received ${String(endUpdate.ready[0]?.length)}`
+      );
     }
   },
   {

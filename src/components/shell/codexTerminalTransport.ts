@@ -59,6 +59,7 @@ export const MAX_TERMINAL_RESIZE_DEFERRAL_MS = 400;
 export const FULL_SCREEN_PTY_WRITE_FLUSH_DELAY_MS = 16;
 export const FULL_SCREEN_LARGE_PTY_WRITE_FLUSH_DELAY_MS = 48;
 export const LARGE_FULL_SCREEN_PTY_WRITE_BYTES = 90;
+export const MAX_SYNC_OUTPUT_BUFFER_BYTES = 1024 * 1024;
 
 export type TerminalMode = "full_screen" | "compact";
 export type TerminalVisualResetReason = "clear_requested" | "session_attached";
@@ -349,10 +350,36 @@ export function consumeTerminalSyncOutput(
     }
   };
 
+  const flushBufferedBytes = () => {
+    if (bufferedLength <= 0) {
+      return;
+    }
+
+    ready.push(concatUint8Arrays(bufferedChunks, bufferedLength));
+    bufferedChunks = [];
+    bufferedLength = 0;
+  };
+
   const appendBufferedBytes = (bytes: Uint8Array) => {
-    if (bytes.length > 0) {
-      bufferedChunks.push(bytes);
-      bufferedLength += bytes.length;
+    let offset = 0;
+
+    while (offset < bytes.length) {
+      const remainingBufferCapacity = MAX_SYNC_OUTPUT_BUFFER_BYTES - bufferedLength;
+
+      if (remainingBufferCapacity <= 0) {
+        flushBufferedBytes();
+        continue;
+      }
+
+      const nextChunkLength = Math.min(remainingBufferCapacity, bytes.length - offset);
+      const nextChunk = bytes.subarray(offset, offset + nextChunkLength);
+      bufferedChunks.push(nextChunk);
+      bufferedLength += nextChunk.length;
+      offset += nextChunkLength;
+
+      if (bufferedLength >= MAX_SYNC_OUTPUT_BUFFER_BYTES) {
+        flushBufferedBytes();
+      }
     }
   };
 
@@ -397,11 +424,7 @@ export function consumeTerminalSyncOutput(
     cursor = sequenceIndex + sequence.length;
 
     if (active) {
-      if (bufferedLength > 0) {
-        ready.push(concatUint8Arrays(bufferedChunks, bufferedLength));
-        bufferedChunks = [];
-        bufferedLength = 0;
-      }
+      flushBufferedBytes();
 
       active = false;
       continue;
