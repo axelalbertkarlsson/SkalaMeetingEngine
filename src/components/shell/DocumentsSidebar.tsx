@@ -14,15 +14,9 @@ import {
   TrashIcon,
   SortIcon
 } from "./icons";
+import type { DocumentTreeItem } from "../../models/documents";
 
-export type DocumentTreeItemKind = "folder" | "note";
-
-export interface DocumentTreeItem {
-  id: string;
-  label: string;
-  kind?: DocumentTreeItemKind;
-  children?: DocumentTreeItem[];
-}
+export type { DocumentTreeItem, DocumentTreeItemKind } from "../../models/documents";
 
 type DocumentContextAction =
   | "add-to-codex"
