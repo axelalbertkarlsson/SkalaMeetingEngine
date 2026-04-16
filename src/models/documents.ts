@@ -80,6 +80,18 @@ export interface DocumentGraphEdge {
   count: number;
 }
 
+export interface DocumentGraphPoint {
+  x: number;
+  y: number;
+}
+
+export type DocumentGraphPinnedPositions = Record<string, DocumentGraphPoint>;
+
+export interface DocumentGraphFocusSet {
+  nodeIds: string[];
+  edgeIds: string[];
+}
+
 export interface DocumentsIndex {
   notes: DocumentNoteIndexEntry[];
   notesById: Record<string, DocumentNoteIndexEntry>;

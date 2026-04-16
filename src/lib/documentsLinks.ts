@@ -1,7 +1,9 @@
 import type {
   DocumentGraphEdge,
+  DocumentGraphFocusSet,
   DocumentGraphLayoutNode,
   DocumentGraphNode,
+  DocumentGraphPinnedPositions,
   DocumentHeading,
   DocumentLinkReference,
   DocumentNoteIndexEntry,
@@ -417,19 +419,71 @@ function stableNodeSeed(value: string) {
   return Math.abs(hash);
 }
 
+export function getDocumentGraphFocus(nodeId: string, edges: DocumentGraphEdge[]): DocumentGraphFocusSet {
+  const nodeIds = new Set<string>([nodeId]);
+  const edgeIds: string[] = [];
+
+  edges.forEach((edge) => {
+    if (edge.source !== nodeId && edge.target !== nodeId) {
+      return;
+    }
+
+    nodeIds.add(edge.source);
+    nodeIds.add(edge.target);
+    edgeIds.push(edge.id);
+  });
+
+  return {
+    nodeIds: [...nodeIds],
+    edgeIds
+  };
+}
+
+export function cleanupDocumentGraphPinnedPositions(
+  pinnedPositions: DocumentGraphPinnedPositions,
+  nodeIds: string[]
+): DocumentGraphPinnedPositions {
+  const validNodeIds = new Set(nodeIds);
+  const nextPinnedPositions: DocumentGraphPinnedPositions = {};
+
+  Object.entries(pinnedPositions).forEach(([nodeId, point]) => {
+    if (!validNodeIds.has(nodeId)) {
+      return;
+    }
+
+    nextPinnedPositions[nodeId] = point;
+  });
+
+  return nextPinnedPositions;
+}
+
 export function computeDocumentGraphLayout(
   nodes: DocumentGraphNode[],
-  edges: DocumentGraphEdge[]
+  edges: DocumentGraphEdge[],
+  options?: {
+    pinnedPositions?: DocumentGraphPinnedPositions;
+  }
 ): DocumentGraphLayoutNode[] {
   if (nodes.length === 0) {
     return [];
   }
 
+  const pinnedPositions = options?.pinnedPositions ?? {};
   const positions = new Map<string, { x: number; y: number }>();
   const velocities = new Map<string, { x: number; y: number }>();
   const radiusBase = Math.max(180, nodes.length * 28);
 
   nodes.forEach((node, index) => {
+    const pinnedPosition = pinnedPositions[node.id];
+    if (pinnedPosition) {
+      positions.set(node.id, {
+        x: pinnedPosition.x,
+        y: pinnedPosition.y
+      });
+      velocities.set(node.id, { x: 0, y: 0 });
+      return;
+    }
+
     const seed = stableNodeSeed(node.id);
     const angle = (Math.PI * 2 * index) / Math.max(1, nodes.length);
     const radius = radiusBase + (seed % 140);
@@ -516,6 +570,15 @@ export function computeDocumentGraphLayout(
       const velocity = velocities.get(node.id);
       const force = forces.get(node.id);
       if (!position || !velocity || !force) {
+        return;
+      }
+
+      const pinnedPosition = pinnedPositions[node.id];
+      if (pinnedPosition) {
+        position.x = pinnedPosition.x;
+        position.y = pinnedPosition.y;
+        velocity.x = 0;
+        velocity.y = 0;
         return;
       }
 

@@ -1245,6 +1245,10 @@ button.documents-link-chip:hover {
   stroke-opacity: 0.78;
   stroke-linecap: round;
   pointer-events: none;
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease,
+    stroke-opacity 140ms ease;
 }
 
 .documents-graph-edge.dangling {
@@ -1255,10 +1259,22 @@ button.documents-link-chip:hover {
 
 .documents-graph-node {
   cursor: default;
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease;
 }
 
 .documents-graph-node.clickable {
   cursor: pointer;
+}
+
+.documents-graph-node circle,
+.documents-graph-node text {
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease,
+    fill 140ms ease,
+    stroke-width 140ms ease;
 }
 
 .documents-graph-node circle {
@@ -1277,6 +1293,30 @@ button.documents-link-chip:hover {
   stroke-width: 3;
 }
 
+.documents-graph-node.focused circle {
+  fill: color-mix(in srgb, var(--accent-color) 18%, var(--panel-bg-secondary));
+  stroke-width: 4;
+}
+
+.documents-graph-node.related circle {
+  fill: color-mix(in srgb, var(--accent-color) 8%, var(--panel-bg-secondary));
+  stroke-width: 2.5;
+}
+
+.documents-graph-node.dragging {
+  filter: drop-shadow(0 10px 20px color-mix(in srgb, var(--accent-color) 24%, transparent));
+}
+
+.documents-graph-node.dragging,
+.documents-graph-node.dragging.clickable {
+  cursor: grabbing;
+}
+
+.documents-graph-node.dragging circle {
+  fill: color-mix(in srgb, var(--accent-color) 22%, var(--panel-bg-secondary));
+  stroke-width: 4.5;
+}
+
 .documents-graph-node text {
   fill: var(--text-primary);
   font-size: 16px;
@@ -1286,6 +1326,30 @@ button.documents-link-chip:hover {
   stroke-width: 5px;
   stroke-linejoin: round;
 }
+
+.documents-graph-root.has-focus .documents-graph-edge.related {
+  stroke-opacity: 1;
+}
+
+.documents-graph-root.has-focus .documents-graph-edge.dimmed,
+.documents-graph-root.has-focus .documents-graph-node.dimmed {
+  opacity: 0.14;
+  filter: blur(2px);
+}
+
+.documents-graph-root.has-focus .documents-graph-node.focused,
+.documents-graph-root.has-focus .documents-graph-node.related {
+  opacity: 1;
+}
+
+.documents-graph-root.has-focus .documents-graph-node.dimmed text {
+  opacity: 0.5;
+}
+
+.documents-graph-root.dragging-node .documents-graph-canvas {
+  cursor: default;
+}
+
 .pane-header {
   display: flex;
   justify-content: space-between;

@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
-import { computeDocumentGraphLayout } from "../../lib/documentsLinks";
-import type { DocumentsIndex } from "../../models/documents";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import {
+  cleanupDocumentGraphPinnedPositions,
+  computeDocumentGraphLayout,
+  getDocumentGraphFocus
+} from "../../lib/documentsLinks";
+import type {
+  DocumentGraphLayoutNode,
+  DocumentGraphPinnedPositions,
+  DocumentsIndex
+} from "../../models/documents";
 
 interface ViewBoxState {
   x: number;
@@ -12,8 +20,12 @@ interface ViewBoxState {
 interface DocumentsGraphViewProps {
   activeNoteId?: string;
   documentsIndex: DocumentsIndex;
+  layoutStorageKey: string;
   onOpenNote: (noteId: string) => void;
 }
+
+const nodeDragHoldDelayMs = 150;
+const nodePointerMoveThreshold = 6;
 
 function createDefaultViewBox(): ViewBoxState {
   return {
@@ -24,63 +36,198 @@ function createDefaultViewBox(): ViewBoxState {
   };
 }
 
+function readGraphPinnedPositions(layoutStorageKey: string): DocumentGraphPinnedPositions {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  const raw = window.localStorage.getItem(layoutStorageKey);
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, { x?: unknown; y?: unknown }>;
+    const nextPinnedPositions: DocumentGraphPinnedPositions = {};
+
+    Object.entries(parsed).forEach(([nodeId, point]) => {
+      if (typeof point?.x !== "number" || typeof point?.y !== "number") {
+        return;
+      }
+
+      nextPinnedPositions[nodeId] = {
+        x: point.x,
+        y: point.y
+      };
+    });
+
+    return nextPinnedPositions;
+  } catch {
+    return {};
+  }
+}
+
+function arePinnedPositionsEqual(
+  first: DocumentGraphPinnedPositions,
+  second: DocumentGraphPinnedPositions
+) {
+  const firstEntries = Object.entries(first);
+  const secondEntries = Object.entries(second);
+  if (firstEntries.length !== secondEntries.length) {
+    return false;
+  }
+
+  return firstEntries.every(([nodeId, point]) => {
+    const otherPoint = second[nodeId];
+    return otherPoint != null && otherPoint.x === point.x && otherPoint.y === point.y;
+  });
+}
+
+function createGraphBounds(nodes: DocumentGraphLayoutNode[]) {
+  return nodes.reduce(
+    (accumulator, node) => ({
+      minX: Math.min(accumulator.minX, node.x),
+      maxX: Math.max(accumulator.maxX, node.x),
+      minY: Math.min(accumulator.minY, node.y),
+      maxY: Math.max(accumulator.maxY, node.y)
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY
+    }
+  );
+}
+
 export function DocumentsGraphView({
   activeNoteId,
   documentsIndex,
+  layoutStorageKey,
   onOpenNote
 }: DocumentsGraphViewProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const dragStateRef = useRef<{
+  const viewBoxRef = useRef<ViewBoxState>(createDefaultViewBox());
+  const pinnedPositionsRef = useRef<DocumentGraphPinnedPositions>(readGraphPinnedPositions(layoutStorageKey));
+  const panStateRef = useRef<{
     pointerId: number;
     originX: number;
     originY: number;
     startViewBox: ViewBoxState;
   } | null>(null);
+  const nodeInteractionRef = useRef<{
+    pointerId: number;
+    nodeId: string;
+    noteId: string | null;
+    originX: number;
+    originY: number;
+    offsetX: number;
+    offsetY: number;
+    isDragging: boolean;
+    hasMoved: boolean;
+    holdTimeoutId: number | null;
+  } | null>(null);
+  const graphStructureKeyRef = useRef<string | null>(null);
   const [viewBox, setViewBox] = useState<ViewBoxState>(createDefaultViewBox);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
+  const [pinnedPositions, setPinnedPositions] = useState<DocumentGraphPinnedPositions>(() =>
+    readGraphPinnedPositions(layoutStorageKey)
+  );
+
+  const persistPinnedPositions = useCallback(
+    (nextPinnedPositions: DocumentGraphPinnedPositions) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      window.localStorage.setItem(layoutStorageKey, JSON.stringify(nextPinnedPositions));
+    },
+    [layoutStorageKey]
+  );
+
+  useEffect(() => {
+    pinnedPositionsRef.current = pinnedPositions;
+  }, [pinnedPositions]);
+
+  useEffect(() => {
+    viewBoxRef.current = viewBox;
+  }, [viewBox]);
+
+  useEffect(() => {
+    const nodeIds = documentsIndex.graphNodes.map((node) => node.id);
+    setPinnedPositions((current) => {
+      const next = cleanupDocumentGraphPinnedPositions(current, nodeIds);
+      if (arePinnedPositionsEqual(current, next)) {
+        return current;
+      }
+
+      pinnedPositionsRef.current = next;
+      persistPinnedPositions(next);
+      return next;
+    });
+  }, [documentsIndex.graphNodes, persistPinnedPositions]);
 
   const layoutNodes = useMemo(
-    () => computeDocumentGraphLayout(documentsIndex.graphNodes, documentsIndex.graphEdges),
-    [documentsIndex.graphEdges, documentsIndex.graphNodes]
+    () =>
+      computeDocumentGraphLayout(documentsIndex.graphNodes, documentsIndex.graphEdges, {
+        pinnedPositions
+      }),
+    [documentsIndex.graphEdges, documentsIndex.graphNodes, pinnedPositions]
   );
   const layoutNodeById = useMemo(
     () => new Map(layoutNodes.map((node) => [node.id, node])),
     [layoutNodes]
   );
+  const focusSet = useMemo(
+    () => (hoveredNodeId ? getDocumentGraphFocus(hoveredNodeId, documentsIndex.graphEdges) : null),
+    [documentsIndex.graphEdges, hoveredNodeId]
+  );
+  const focusNodeIds = useMemo(() => new Set(focusSet?.nodeIds ?? []), [focusSet]);
+  const focusEdgeIds = useMemo(() => new Set(focusSet?.edgeIds ?? []), [focusSet]);
+  const nodeRadiusById = useMemo(() => {
+    const radiusById = new Map<string, number>();
 
-  const getNodeRadius = (nodeId: string) => {
-    const node = layoutNodeById.get(nodeId);
-    if (!node) {
-      return 20;
-    }
+    layoutNodes.forEach((node) => {
+      let radius = node.kind === "dangling" ? 18 : node.noteId !== null && node.noteId === activeNoteId ? 22 : 20;
 
-    if (node.kind === "dangling") {
-      return 18;
-    }
+      if (hoveredNodeId === node.id) {
+        radius += 4;
+      } else if (hoveredNodeId && focusNodeIds.has(node.id)) {
+        radius += 2;
+      }
 
-    return node.noteId !== null && node.noteId === activeNoteId ? 22 : 20;
-  };
+      if (draggedNodeId === node.id) {
+        radius += 2;
+      }
+
+      radiusById.set(node.id, radius);
+    });
+
+    return radiusById;
+  }, [activeNoteId, draggedNodeId, focusNodeIds, hoveredNodeId, layoutNodes]);
+  const graphStructureKey = useMemo(
+    () =>
+      JSON.stringify({
+        nodeIds: documentsIndex.graphNodes.map((node) => node.id),
+        edgeIds: documentsIndex.graphEdges.map((edge) => edge.id)
+      }),
+    [documentsIndex.graphEdges, documentsIndex.graphNodes]
+  );
 
   useEffect(() => {
     if (layoutNodes.length === 0) {
+      graphStructureKeyRef.current = graphStructureKey;
       setViewBox(createDefaultViewBox());
       return;
     }
 
-    const bounds = layoutNodes.reduce(
-      (accumulator, node) => ({
-        minX: Math.min(accumulator.minX, node.x),
-        maxX: Math.max(accumulator.maxX, node.x),
-        minY: Math.min(accumulator.minY, node.y),
-        maxY: Math.max(accumulator.maxY, node.y)
-      }),
-      {
-        minX: Number.POSITIVE_INFINITY,
-        maxX: Number.NEGATIVE_INFINITY,
-        minY: Number.POSITIVE_INFINITY,
-        maxY: Number.NEGATIVE_INFINITY
-      }
-    );
+    if (graphStructureKeyRef.current === graphStructureKey) {
+      return;
+    }
 
+    graphStructureKeyRef.current = graphStructureKey;
+    const bounds = createGraphBounds(layoutNodes);
     const padding = 180;
     setViewBox({
       x: bounds.minX - padding,
@@ -88,27 +235,88 @@ export function DocumentsGraphView({
       width: Math.max(560, bounds.maxX - bounds.minX + padding * 2),
       height: Math.max(420, bounds.maxY - bounds.minY + padding * 2)
     });
-  }, [layoutNodes]);
+  }, [graphStructureKey, layoutNodes]);
 
-  const beginDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
+  const clientToWorldPoint = useCallback((clientX: number, clientY: number) => {
+    const svg = svgRef.current;
+    if (!svg) {
+      return null;
+    }
+
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    const currentViewBox = viewBoxRef.current;
+    return {
+      x: currentViewBox.x + ((clientX - rect.left) / rect.width) * currentViewBox.width,
+      y: currentViewBox.y + ((clientY - rect.top) / rect.height) * currentViewBox.height
+    };
+  }, []);
+
+  const updatePinnedNodePosition = useCallback((nodeId: string, x: number, y: number) => {
+    setPinnedPositions((current) => {
+      const existingPoint = current[nodeId];
+      if (existingPoint && existingPoint.x === x && existingPoint.y === y) {
+        return current;
+      }
+
+      const next = {
+        ...current,
+        [nodeId]: { x, y }
+      };
+      pinnedPositionsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const clearNodeInteraction = useCallback(
+    (persistLayout: boolean) => {
+      const interaction = nodeInteractionRef.current;
+      if (!interaction) {
+        return;
+      }
+
+      if (typeof interaction.holdTimeoutId === "number") {
+        window.clearTimeout(interaction.holdTimeoutId);
+      }
+
+      if (persistLayout && interaction.isDragging) {
+        persistPinnedPositions(pinnedPositionsRef.current);
+      }
+
+      nodeInteractionRef.current = null;
+      setDraggedNodeId(null);
+    },
+    [persistPinnedPositions]
+  );
+
+  useEffect(() => {
+    return () => {
+      clearNodeInteraction(true);
+    };
+  }, [clearNodeInteraction]);
+
+  const beginCanvasPan = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (event.button !== 0 || !svgRef.current) {
       return;
     }
 
-    dragStateRef.current = {
+    panStateRef.current = {
       pointerId: event.pointerId,
       originX: event.clientX,
       originY: event.clientY,
-      startViewBox: viewBox
+      startViewBox: viewBoxRef.current
     };
 
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const updateDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
-    const dragState = dragStateRef.current;
+  const updateCanvasPan = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const panState = panStateRef.current;
     const svg = svgRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId || !svg) {
+    if (!panState || panState.pointerId !== event.pointerId || !svg) {
       return;
     }
 
@@ -117,22 +325,22 @@ export function DocumentsGraphView({
       return;
     }
 
-    const deltaX = ((event.clientX - dragState.originX) / rect.width) * dragState.startViewBox.width;
-    const deltaY = ((event.clientY - dragState.originY) / rect.height) * dragState.startViewBox.height;
+    const deltaX = ((event.clientX - panState.originX) / rect.width) * panState.startViewBox.width;
+    const deltaY = ((event.clientY - panState.originY) / rect.height) * panState.startViewBox.height;
 
     setViewBox({
-      ...dragState.startViewBox,
-      x: dragState.startViewBox.x - deltaX,
-      y: dragState.startViewBox.y - deltaY
+      ...panState.startViewBox,
+      x: panState.startViewBox.x - deltaX,
+      y: panState.startViewBox.y - deltaY
     });
   };
 
-  const endDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (dragStateRef.current?.pointerId !== event.pointerId) {
+  const endCanvasPan = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (panStateRef.current?.pointerId !== event.pointerId) {
       return;
     }
 
-    dragStateRef.current = null;
+    panStateRef.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
@@ -149,13 +357,14 @@ export function DocumentsGraphView({
       return;
     }
 
+    const currentViewBox = viewBoxRef.current;
     const zoomFactor = event.deltaY > 0 ? 1.12 : 0.9;
-    const nextWidth = Math.max(240, Math.min(3200, viewBox.width * zoomFactor));
-    const nextHeight = Math.max(180, Math.min(2400, viewBox.height * zoomFactor));
+    const nextWidth = Math.max(240, Math.min(3200, currentViewBox.width * zoomFactor));
+    const nextHeight = Math.max(180, Math.min(2400, currentViewBox.height * zoomFactor));
     const pointerRatioX = (event.clientX - rect.left) / rect.width;
     const pointerRatioY = (event.clientY - rect.top) / rect.height;
-    const pointerWorldX = viewBox.x + viewBox.width * pointerRatioX;
-    const pointerWorldY = viewBox.y + viewBox.height * pointerRatioY;
+    const pointerWorldX = currentViewBox.x + currentViewBox.width * pointerRatioX;
+    const pointerWorldY = currentViewBox.y + currentViewBox.height * pointerRatioY;
 
     setViewBox({
       x: pointerWorldX - nextWidth * pointerRatioX,
@@ -163,6 +372,103 @@ export function DocumentsGraphView({
       width: nextWidth,
       height: nextHeight
     });
+  };
+
+  const beginNodeInteraction = (event: ReactPointerEvent<SVGGElement>, node: DocumentGraphLayoutNode) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.stopPropagation();
+    const pointerWorldPoint = clientToWorldPoint(event.clientX, event.clientY);
+    if (!pointerWorldPoint) {
+      return;
+    }
+
+    const holdTimeoutId = window.setTimeout(() => {
+      const interaction = nodeInteractionRef.current;
+      if (!interaction || interaction.pointerId !== event.pointerId) {
+        return;
+      }
+
+      interaction.isDragging = true;
+      setDraggedNodeId(node.id);
+      setHoveredNodeId(node.id);
+      updatePinnedNodePosition(node.id, node.x, node.y);
+    }, nodeDragHoldDelayMs);
+
+    nodeInteractionRef.current = {
+      pointerId: event.pointerId,
+      nodeId: node.id,
+      noteId: node.noteId,
+      originX: event.clientX,
+      originY: event.clientY,
+      offsetX: pointerWorldPoint.x - node.x,
+      offsetY: pointerWorldPoint.y - node.y,
+      isDragging: false,
+      hasMoved: false,
+      holdTimeoutId
+    };
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setHoveredNodeId(node.id);
+  };
+
+  const updateNodeInteraction = (event: ReactPointerEvent<SVGGElement>) => {
+    const interaction = nodeInteractionRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.stopPropagation();
+    const movement = Math.hypot(event.clientX - interaction.originX, event.clientY - interaction.originY);
+    if (movement >= nodePointerMoveThreshold) {
+      interaction.hasMoved = true;
+    }
+
+    if (!interaction.isDragging) {
+      return;
+    }
+
+    const pointerWorldPoint = clientToWorldPoint(event.clientX, event.clientY);
+    if (!pointerWorldPoint) {
+      return;
+    }
+
+    updatePinnedNodePosition(
+      interaction.nodeId,
+      pointerWorldPoint.x - interaction.offsetX,
+      pointerWorldPoint.y - interaction.offsetY
+    );
+    setHoveredNodeId(interaction.nodeId);
+  };
+
+  const endNodeInteraction = (event: ReactPointerEvent<SVGGElement>) => {
+    const interaction = nodeInteractionRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.stopPropagation();
+    event.currentTarget.releasePointerCapture(event.pointerId);
+
+    const shouldOpenNote = !interaction.isDragging && !interaction.hasMoved && interaction.noteId !== null;
+    clearNodeInteraction(true);
+
+    if (shouldOpenNote) {
+      onOpenNote(interaction.noteId!);
+    }
+  };
+
+  const cancelNodeInteraction = (event: ReactPointerEvent<SVGGElement>) => {
+    const interaction = nodeInteractionRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.stopPropagation();
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    clearNodeInteraction(true);
   };
 
   if (layoutNodes.length === 0) {
@@ -174,7 +480,15 @@ export function DocumentsGraphView({
   }
 
   return (
-    <div className="documents-graph-root">
+    <div
+      className={[
+        "documents-graph-root",
+        hoveredNodeId ? "has-focus" : "",
+        draggedNodeId ? "dragging-node" : ""
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
       <div className="documents-graph-status">
         <span>
           {documentsIndex.graphNodes.length} notes, {documentsIndex.graphEdges.length} links
@@ -189,10 +503,15 @@ export function DocumentsGraphView({
         ref={svgRef}
         className="documents-graph-canvas"
         viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
-        onPointerDown={beginDrag}
-        onPointerMove={updateDrag}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
+        onPointerDown={beginCanvasPan}
+        onPointerMove={updateCanvasPan}
+        onPointerUp={endCanvasPan}
+        onPointerCancel={endCanvasPan}
+        onPointerLeave={() => {
+          if (!nodeInteractionRef.current) {
+            setHoveredNodeId(null);
+          }
+        }}
         onWheel={handleWheel}
         role="img"
         aria-label="Documents link graph"
@@ -216,19 +535,26 @@ export function DocumentsGraphView({
             const dx = targetNode.x - sourceNode.x;
             const dy = targetNode.y - sourceNode.y;
             const distance = Math.max(1, Math.hypot(dx, dy));
-            const sourceRadius = getNodeRadius(edge.source);
-            const targetRadius = getNodeRadius(edge.target);
+            const sourceRadius = nodeRadiusById.get(edge.source) ?? 20;
+            const targetRadius = nodeRadiusById.get(edge.target) ?? 20;
             const sourceOffset = sourceRadius + 2;
             const targetOffset = targetRadius + 2;
             const x1 = sourceNode.x + (dx / distance) * sourceOffset;
             const y1 = sourceNode.y + (dy / distance) * sourceOffset;
             const x2 = targetNode.x - (dx / distance) * targetOffset;
             const y2 = targetNode.y - (dy / distance) * targetOffset;
+            const edgeClassName = [
+              "documents-graph-edge",
+              edge.isDangling ? "dangling" : "",
+              hoveredNodeId ? (focusEdgeIds.has(edge.id) ? "related" : "dimmed") : ""
+            ]
+              .filter(Boolean)
+              .join(" ");
 
             return (
               <line
                 key={edge.id}
-                className={edge.isDangling ? "documents-graph-edge dangling" : "documents-graph-edge"}
+                className={edgeClassName}
                 x1={x1}
                 y1={y1}
                 x2={x2}
@@ -243,8 +569,10 @@ export function DocumentsGraphView({
         <g className="documents-graph-nodes">
           {layoutNodes.map((node) => {
             const isActive = node.noteId !== null && node.noteId === activeNoteId;
-            const radius = node.kind === "dangling" ? 18 : isActive ? 22 : 20;
+            const isFocused = hoveredNodeId === node.id;
+            const isRelated = hoveredNodeId !== null && !isFocused && focusNodeIds.has(node.id);
             const canOpen = node.noteId !== null;
+            const radius = nodeRadiusById.get(node.id) ?? 20;
 
             return (
               <g
@@ -253,14 +581,23 @@ export function DocumentsGraphView({
                   "documents-graph-node",
                   node.kind === "dangling" ? "dangling" : "",
                   isActive ? "active" : "",
+                  isFocused ? "focused" : "",
+                  isRelated ? "related" : "",
+                  hoveredNodeId !== null && !focusNodeIds.has(node.id) ? "dimmed" : "",
+                  draggedNodeId === node.id ? "dragging" : "",
                   canOpen ? "clickable" : ""
                 ]
                   .filter(Boolean)
                   .join(" ")}
                 transform={`translate(${node.x} ${node.y})`}
-                onClick={() => {
-                  if (node.noteId) {
-                    onOpenNote(node.noteId);
+                onPointerDown={(event) => beginNodeInteraction(event, node)}
+                onPointerMove={updateNodeInteraction}
+                onPointerUp={endNodeInteraction}
+                onPointerCancel={cancelNodeInteraction}
+                onPointerEnter={() => setHoveredNodeId(node.id)}
+                onPointerLeave={() => {
+                  if (draggedNodeId !== node.id) {
+                    setHoveredNodeId((current) => (current === node.id ? null : current));
                   }
                 }}
               >

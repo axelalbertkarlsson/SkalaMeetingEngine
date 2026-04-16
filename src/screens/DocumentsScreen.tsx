@@ -131,6 +131,10 @@ export function DocumentsScreen({
   const activeNote = noteId ? documentsIndex.notesById[noteId] : undefined;
   const outgoingLinks = useMemo(() => getDocumentOutgoingLinks(noteId, documentsIndex), [documentsIndex, noteId]);
   const backlinks = useMemo(() => getDocumentBacklinks(noteId, documentsIndex), [documentsIndex, noteId]);
+  const graphLayoutStorageKey = useMemo(
+    () => `documents.graphLayout.${encodeURIComponent(documentsBasePath || "default")}`,
+    [documentsBasePath]
+  );
 
   const editorSurfaceStyle = {
     "--documents-editor-font-family":
@@ -265,8 +269,10 @@ export function DocumentsScreen({
         >
           {rightPaneMode === "graph" ? (
             <DocumentsGraphView
+              key={graphLayoutStorageKey}
               activeNoteId={noteId}
               documentsIndex={documentsIndex}
+              layoutStorageKey={graphLayoutStorageKey}
               onOpenNote={onOpenDocumentLink}
             />
           ) : (

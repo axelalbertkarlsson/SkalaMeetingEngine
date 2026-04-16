@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import {
   buildDocumentsIndex,
+  cleanupDocumentGraphPinnedPositions,
+  computeDocumentGraphLayout,
+  getDocumentGraphFocus,
   parseWikiLinks,
   rewriteResolvedWikiLinks
 } from "../src/lib/documentsLinks.ts";
@@ -157,6 +160,90 @@ runTest("rewrites preserve alias and heading", () => {
     nextMarkdown,
     "See [[Execution plan#Next steps|Delivery plan]] and [[Execution plan]]."
   );
+});
+
+runTest("graph focus returns one-hop neighbors and edges", () => {
+  const focus = getDocumentGraphFocus("note-b", [
+    {
+      id: "note-a=>note-b",
+      source: "note-a",
+      target: "note-b",
+      sourceNoteId: "note-a",
+      targetNoteId: "note-b",
+      isDangling: false,
+      count: 1
+    },
+    {
+      id: "note-b=>note-c",
+      source: "note-b",
+      target: "note-c",
+      sourceNoteId: "note-b",
+      targetNoteId: "note-c",
+      isDangling: false,
+      count: 1
+    },
+    {
+      id: "note-c=>note-d",
+      source: "note-c",
+      target: "note-d",
+      sourceNoteId: "note-c",
+      targetNoteId: "note-d",
+      isDangling: false,
+      count: 1
+    }
+  ]);
+
+  assert.deepEqual(focus.nodeIds.sort(), ["note-a", "note-b", "note-c"]);
+  assert.deepEqual(focus.edgeIds.sort(), ["note-a=>note-b", "note-b=>note-c"]);
+});
+
+runTest("graph layout preserves pinned positions while laying out other nodes", () => {
+  const layout = computeDocumentGraphLayout(
+    [
+      { id: "note-a", label: "Note A", canonicalPath: "Note A", noteId: "note-a", kind: "note", degree: 1 },
+      { id: "note-b", label: "Note B", canonicalPath: "Note B", noteId: "note-b", kind: "note", degree: 1 }
+    ],
+    [
+      {
+        id: "note-a=>note-b",
+        source: "note-a",
+        target: "note-b",
+        sourceNoteId: "note-a",
+        targetNoteId: "note-b",
+        isDangling: false,
+        count: 1
+      }
+    ],
+    {
+      pinnedPositions: {
+        "note-a": { x: 120, y: -80 }
+      }
+    }
+  );
+
+  const pinnedNode = layout.find((node) => node.id === "note-a");
+  const floatingNode = layout.find((node) => node.id === "note-b");
+
+  assert.ok(pinnedNode);
+  assert.ok(floatingNode);
+  assert.equal(pinnedNode?.x, 120);
+  assert.equal(pinnedNode?.y, -80);
+  assert.equal(typeof floatingNode?.x, "number");
+  assert.equal(typeof floatingNode?.y, "number");
+});
+
+runTest("graph pinned position cleanup removes stale node ids", () => {
+  const cleaned = cleanupDocumentGraphPinnedPositions(
+    {
+      "note-a": { x: 10, y: 20 },
+      "note-z": { x: 30, y: 40 }
+    },
+    ["note-a", "note-b"]
+  );
+
+  assert.deepEqual(cleaned, {
+    "note-a": { x: 10, y: 20 }
+  });
 });
 
 console.log("All document link tests passed.");
