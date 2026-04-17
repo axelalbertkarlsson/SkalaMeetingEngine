@@ -47,6 +47,7 @@ export function AppShell(props: AppShellProps) {
     "--sidebar-handle-size": "0px",
     "--inspector-size": rightDockOpen ? `${Math.round(rightDockWidth)}px` : "0px",
     "--inspector-handle-size": rightDockOpen ? "1px" : "0px",
+    "--shell-columns-transition": rightDockOpen ? "none" : "grid-template-columns 180ms ease",
     "--bottom-size": bottomPanelOpen ? `${Math.round(bottomPanelHeight)}px` : "0px",
     "--tabs-right-padding": rightDockOpen ? "8px" : "calc(var(--window-controls-width) + 8px)"
   } as CSSProperties;

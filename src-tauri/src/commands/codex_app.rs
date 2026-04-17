@@ -288,6 +288,15 @@ impl CodexAppConnection {
             .ok()
             .and_then(|mut pending| pending.remove(&request_id))
     }
+
+    fn fail_pending_requests(&self, message: &str) {
+        if let Ok(mut pending) = self.pending_requests.lock() {
+            let drained = pending.drain().map(|(_, tx)| tx).collect::<Vec<_>>();
+            for tx in drained {
+                let _ = tx.send(Err(message.to_string()));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -592,11 +601,7 @@ fn build_spawn_attempts(command: &str, request_args: &[String]) -> Vec<SpawnAtte
 }
 
 fn spawn_codex_app_server_process(command: &str) -> Result<Child, String> {
-    let request_args = vec![
-        "app-server".to_string(),
-        "--session-source".to_string(),
-        "skala_meeting_engine".to_string(),
-    ];
+    let request_args = vec!["app-server".to_string()];
 
     let attempts = build_spawn_attempts(command, &request_args);
     let mut errors = Vec::new();
@@ -903,7 +908,9 @@ fn execute_shell_command_tool(
     let mut child = process.spawn().map_err(|error| {
         format!(
             "Failed to spawn shell_command '{}' in '{}': {}",
-            trimmed_command, requested_workdir, error
+            trimmed_command,
+            requested_workdir.display(),
+            error
         )
     })?;
 
@@ -1412,6 +1419,7 @@ fn finalize_connection_shutdown(
         }
     };
 
+    connection.fail_pending_requests(&exit_message);
     let _ = state.remove(connection_id);
 
     append_codex_bridge_log(

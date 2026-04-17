@@ -54,13 +54,19 @@ import { useCodexController } from "./hooks/useCodexController";
 import {
   copyDocumentNoteFile,
   deleteDocumentNoteFile,
-  flushDocumentNoteDraftToFile,
   getDocumentMarkdownStorageKey,
+  readDocumentMarkdownFromLocalStorage,
+  readDocumentNoteFile,
   resolveDocumentNoteFilePath,
   writeDocumentMarkdownToLocalStorage,
   writeDocumentNoteFile
 } from "./services/documentsFileStore";
 import { prepareCodexContextFileForWorkspace } from "./services/codexContextFileStore";
+import {
+  buildDocumentsIndex,
+  getPreferredDocumentLinkPath,
+  rewriteResolvedWikiLinks
+} from "./lib/documentsLinks";
 import type { CodexAccessMode, CodexReasoningEffort } from "./models/codex";
 import type { Artifact, RecordingSource, Run, RunStatus } from "./models/run";
 import { CaptureScreen } from "./screens/CaptureScreen";
@@ -394,6 +400,56 @@ function cloneDocumentItem(item: DocumentTreeItem): DocumentTreeItem {
   };
 }
 
+function collectAllDocumentNoteIds(items: DocumentTreeItem[]) {
+  return items.flatMap((item) => collectDocumentNoteIds(item, []));
+}
+
+function normalizeDocumentLabelInput(value: string) {
+  return value
+    .replace(/[\\/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getDocumentSiblingItems(items: DocumentTreeItem[], parentFolderId: string | null) {
+  if (!parentFolderId) {
+    return items;
+  }
+
+  const parentFolder = findDocumentItem(items, parentFolderId);
+  if (!parentFolder || !isDocumentFolder(parentFolder)) {
+    return [];
+  }
+
+  return parentFolder.children ?? [];
+}
+
+function ensureUniqueDocumentLabel(
+  items: DocumentTreeItem[],
+  parentFolderId: string | null,
+  desiredLabel: string,
+  excludeItemId?: string
+) {
+  const normalizedLabel = normalizeDocumentLabelInput(desiredLabel) || "Untitled";
+  const siblingItems = getDocumentSiblingItems(items, parentFolderId).filter(
+    (item) => item.id !== excludeItemId
+  );
+  const existingLabels = new Set(
+    siblingItems.map((item) => item.label.trim().toLocaleLowerCase())
+  );
+
+  if (!existingLabels.has(normalizedLabel.toLocaleLowerCase())) {
+    return normalizedLabel;
+  }
+
+  let suffix = 2;
+  while (existingLabels.has(`${normalizedLabel} ${suffix}`.toLocaleLowerCase())) {
+    suffix += 1;
+  }
+
+  return `${normalizedLabel} ${suffix}`;
+}
+
 const statusLabels: Record<RunStatus, string> = {
   queued: "Queued",
   running: "Running",
@@ -603,6 +659,9 @@ function App() {
     "documents.sidebarItems",
     initialDocumentsSidebarItems
   );
+  const [documentMarkdownById, setDocumentMarkdownById] = useState<Record<string, string>>({});
+  const [documentMarkdownReadyById, setDocumentMarkdownReadyById] = useState<Record<string, boolean>>({});
+  const [documentExternalRevisionById, setDocumentExternalRevisionById] = useState<Record<string, number>>({});
   const [pendingDelete, setPendingDelete] = useState<{
     itemId: string;
     label: string;
@@ -646,6 +705,12 @@ function App() {
   const [documentsEditorFont, setDocumentsEditorFont] = useLocalStorageState<DocumentsEditorFont>(
     "settings.documents.editorFont",
     "switzer"
+  );
+  const documentMarkdownRef = useRef(documentMarkdownById);
+  const documentWriteTimeoutsRef = useRef<Record<string, number>>({});
+  const documentNoteIds = useMemo(
+    () => collectAllDocumentNoteIds(documentsSidebarItems),
+    [documentsSidebarItems]
   );
   const staticRuns = useMemo(
     () => mockRuns.filter((run) => run.type !== "meeting_import" && run.type !== "meeting_recording"),
@@ -1245,6 +1310,222 @@ function App() {
     return () => window.removeEventListener("resize", syncBottomPanelHeight);
   }, [bottomPanelHeight, setBottomPanelHeight]);
 
+  useEffect(() => {
+    documentMarkdownRef.current = documentMarkdownById;
+  }, [documentMarkdownById]);
+
+  const persistDocumentMarkdown = useCallback(
+    (noteId: string, markdown: string, immediate = false) => {
+      writeDocumentMarkdownToLocalStorage(noteId, markdown);
+
+      const pendingTimeoutId = documentWriteTimeoutsRef.current[noteId];
+      if (typeof pendingTimeoutId === "number") {
+        window.clearTimeout(pendingTimeoutId);
+        delete documentWriteTimeoutsRef.current[noteId];
+      }
+
+      if (immediate) {
+        void writeDocumentNoteFile(noteId, markdown, documentsBasePath);
+        return;
+      }
+
+      documentWriteTimeoutsRef.current[noteId] = window.setTimeout(() => {
+        delete documentWriteTimeoutsRef.current[noteId];
+        void writeDocumentNoteFile(noteId, markdown, documentsBasePath);
+      }, 160);
+    },
+    [documentsBasePath]
+  );
+
+  const flushPendingDocumentWrite = useCallback(
+    (noteId: string) => {
+      const pendingTimeoutId = documentWriteTimeoutsRef.current[noteId];
+      if (typeof pendingTimeoutId === "number") {
+        window.clearTimeout(pendingTimeoutId);
+        delete documentWriteTimeoutsRef.current[noteId];
+      }
+
+      const markdown = documentMarkdownRef.current[noteId] ?? "";
+      writeDocumentMarkdownToLocalStorage(noteId, markdown);
+      void writeDocumentNoteFile(noteId, markdown, documentsBasePath);
+    },
+    [documentsBasePath]
+  );
+
+  const flushAllPendingDocumentWrites = useCallback(() => {
+    Object.keys(documentWriteTimeoutsRef.current).forEach((noteId) => {
+      flushPendingDocumentWrite(noteId);
+    });
+  }, [flushPendingDocumentWrite]);
+
+  useEffect(() => {
+    return () => {
+      flushAllPendingDocumentWrites();
+    };
+  }, [flushAllPendingDocumentWrites]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setDocumentMarkdownReadyById(
+      Object.fromEntries(documentNoteIds.map((noteId) => [noteId, false])) as Record<string, boolean>
+    );
+
+    const loadDocumentMarkdown = async () => {
+      const entries = await Promise.all(
+        documentNoteIds.map(async (noteId) => {
+          const localMarkdown = readDocumentMarkdownFromLocalStorage(noteId);
+          const fileMarkdown = await readDocumentNoteFile(noteId, documentsBasePath);
+
+          return [noteId, localMarkdown ?? fileMarkdown ?? ""] as const;
+        })
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      const loadedMarkdown = Object.fromEntries(entries) as Record<string, string>;
+      const readyMarkdown = Object.fromEntries(
+        documentNoteIds.map((noteId) => [noteId, true])
+      ) as Record<string, boolean>;
+
+      setDocumentMarkdownById((current) => {
+        const next: Record<string, string> = {};
+        documentNoteIds.forEach((noteId) => {
+          next[noteId] = loadedMarkdown[noteId] ?? current[noteId] ?? "";
+        });
+        return next;
+      });
+      setDocumentMarkdownReadyById(readyMarkdown);
+    };
+
+    void loadDocumentMarkdown();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [documentNoteIds, documentsBasePath]);
+
+  const applyDocumentMarkdownUpdates = useCallback(
+    (updates: Record<string, string>, immediate = true) => {
+      const updateEntries = Object.entries(updates);
+      if (updateEntries.length === 0) {
+        return;
+      }
+
+      setDocumentMarkdownById((current) => {
+        const next = { ...current };
+        updateEntries.forEach(([noteId, markdown]) => {
+          next[noteId] = markdown;
+        });
+        return next;
+      });
+      setDocumentMarkdownReadyById((current) => {
+        const next = { ...current };
+        updateEntries.forEach(([noteId]) => {
+          next[noteId] = true;
+        });
+        return next;
+      });
+      setDocumentExternalRevisionById((current) => {
+        const next = { ...current };
+        updateEntries.forEach(([noteId]) => {
+          next[noteId] = (next[noteId] ?? 0) + 1;
+        });
+        return next;
+      });
+
+      updateEntries.forEach(([noteId, markdown]) => {
+        persistDocumentMarkdown(noteId, markdown, immediate);
+      });
+    },
+    [persistDocumentMarkdown]
+  );
+
+  const removeDocumentMarkdownState = useCallback((noteIds: string[]) => {
+    if (noteIds.length === 0) {
+      return;
+    }
+
+    setDocumentMarkdownById((current) => {
+      const next = { ...current };
+      noteIds.forEach((noteId) => {
+        delete next[noteId];
+      });
+      return next;
+    });
+    setDocumentMarkdownReadyById((current) => {
+      const next = { ...current };
+      noteIds.forEach((noteId) => {
+        delete next[noteId];
+      });
+      return next;
+    });
+    setDocumentExternalRevisionById((current) => {
+      const next = { ...current };
+      noteIds.forEach((noteId) => {
+        delete next[noteId];
+      });
+      return next;
+    });
+  }, []);
+
+  const handleDocumentMarkdownChange = useCallback(
+    (noteId: string, markdown: string) => {
+      setDocumentMarkdownById((current) => ({
+        ...current,
+        [noteId]: markdown
+      }));
+      setDocumentMarkdownReadyById((current) => ({
+        ...current,
+        [noteId]: true
+      }));
+      persistDocumentMarkdown(noteId, markdown);
+    },
+    [persistDocumentMarkdown]
+  );
+
+  const documentsIndex = useMemo(
+    () => buildDocumentsIndex(documentsSidebarItems, documentMarkdownById),
+    [documentMarkdownById, documentsSidebarItems]
+  );
+
+  const rewriteDocumentLinksForTargets = useCallback(
+    (nextTree: DocumentTreeItem[], targetNoteIds: string[]) => {
+      if (targetNoteIds.length === 0) {
+        return;
+      }
+
+      const targetIdSet = new Set(targetNoteIds);
+      const nextIndex = buildDocumentsIndex(nextTree, documentMarkdownRef.current);
+      const updates: Record<string, string> = {};
+
+      Object.entries(documentMarkdownRef.current).forEach(([noteId, markdown]) => {
+        const sourceNote = documentsIndex.notesById[noteId];
+        if (!sourceNote) {
+          return;
+        }
+
+        const nextMarkdown = rewriteResolvedWikiLinks(markdown, sourceNote, documentsIndex, (link) => {
+          if (!link.targetNoteId || !targetIdSet.has(link.targetNoteId)) {
+            return null;
+          }
+
+          const nextTargetNote = nextIndex.notesById[link.targetNoteId];
+          return nextTargetNote ? getPreferredDocumentLinkPath(nextTargetNote) : null;
+        });
+
+        if (nextMarkdown !== markdown) {
+          updates[noteId] = nextMarkdown;
+        }
+      });
+
+      applyDocumentMarkdownUpdates(updates, true);
+    },
+    [applyDocumentMarkdownUpdates, documentsIndex]
+  );
+
   const activeSidebarGroups = sidebarGroupsBySection[activeSection];
   const selectedSidebarItemId = (() => {
     const storedSelection = selectedSidebarItems[activeSection];
@@ -1271,39 +1552,41 @@ function App() {
   const createDocumentItem = (kind: "note" | "folder", parentFolderId?: string): DocumentTreeItem => {
     const nextId = createDocumentItemId(kind);
     const nextNumber = countDocumentItemsByKind(documentsSidebarItems, kind) + 1;
+    const resolvedParentFolderId =
+      typeof parentFolderId === "string"
+        ? parentFolderId
+        : (() => {
+            const selectedItem = selectedSidebarItemId
+              ? findDocumentItem(documentsSidebarItems, selectedSidebarItemId)
+              : undefined;
+
+            if (!selectedItem) {
+              return null;
+            }
+
+            if (isDocumentFolder(selectedItem)) {
+              return selectedItem.id;
+            }
+
+            return findDocumentParentFolderId(documentsSidebarItems, selectedItem.id);
+          })();
+    const suggestedLabel = kind === "folder" ? `New folder ${nextNumber}` : `New note ${nextNumber}`;
+    const nextLabel = ensureUniqueDocumentLabel(
+      documentsSidebarItems,
+      resolvedParentFolderId,
+      suggestedLabel
+    );
     const nextItem: DocumentTreeItem =
       kind === "folder"
-        ? { id: nextId, label: `New folder ${nextNumber}`, kind: "folder", children: [] }
-        : { id: nextId, label: `New note ${nextNumber}`, kind: "note" };
+        ? { id: nextId, label: nextLabel, kind: "folder", children: [] }
+        : { id: nextId, label: nextLabel, kind: "note" };
 
-    setDocumentsSidebarItems((currentItems) => {
-      const resolvedParentFolderId =
-        typeof parentFolderId === "string"
-          ? parentFolderId
-          : (() => {
-              const selectedItem = selectedSidebarItemId
-                ? findDocumentItem(currentItems, selectedSidebarItemId)
-                : undefined;
-
-              if (!selectedItem) {
-                return null;
-              }
-
-              if (isDocumentFolder(selectedItem)) {
-                return selectedItem.id;
-              }
-
-              return findDocumentParentFolderId(currentItems, selectedItem.id);
-            })();
-
-      return appendDocumentItem(currentItems, resolvedParentFolderId, nextItem);
-    });
+    setDocumentsSidebarItems((currentItems) =>
+      appendDocumentItem(currentItems, resolvedParentFolderId, nextItem)
+    );
 
     if (kind === "note") {
-      writeDocumentMarkdownToLocalStorage(nextId, "");
-    }
-    if (kind === "note") {
-      void writeDocumentNoteFile(nextId, "", documentsBasePath);
+      applyDocumentMarkdownUpdates({ [nextId]: "" }, true);
     }
 
     setSelectedSidebarItems((current) => ({
@@ -1419,48 +1702,77 @@ function App() {
     );
   };
 
+  const handleOpenDocumentLink = useCallback(
+    (noteId: string) => {
+      handleOpenDocumentFromSidebar(noteId);
+    },
+    [handleOpenDocumentFromSidebar]
+  );
+
   const handleMoveDocumentItem = (itemId: string, targetFolderId: string | null) => {
     if (targetFolderId !== null && itemId === targetFolderId) {
       return;
     }
 
-    setDocumentsSidebarItems((currentItems) => {
-      const sourceItem = findDocumentItem(currentItems, itemId);
-      const targetFolder = targetFolderId ? findDocumentItem(currentItems, targetFolderId) : null;
+    const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
+    const targetFolder = targetFolderId ? findDocumentItem(documentsSidebarItems, targetFolderId) : null;
 
-      if (!sourceItem) {
-        return currentItems;
-      }
+    if (!sourceItem) {
+      return;
+    }
 
-      if (targetFolderId !== null && (!targetFolder || !isDocumentFolder(targetFolder))) {
-        return currentItems;
-      }
+    if (targetFolderId !== null && (!targetFolder || !isDocumentFolder(targetFolder))) {
+      return;
+    }
 
-      if (targetFolderId !== null && isDocumentFolder(sourceItem) && documentTreeContainsId(sourceItem, targetFolderId)) {
-        return currentItems;
-      }
+    if (
+      targetFolderId !== null &&
+      isDocumentFolder(sourceItem) &&
+      documentTreeContainsId(sourceItem, targetFolderId)
+    ) {
+      return;
+    }
 
-      const currentParentId = findDocumentParentFolderId(currentItems, itemId);
-      if (currentParentId === targetFolderId) {
-        return currentItems;
-      }
+    const currentParentId = findDocumentParentFolderId(documentsSidebarItems, itemId);
+    if (currentParentId === targetFolderId) {
+      return;
+    }
 
-      const detached = detachDocumentItem(currentItems, itemId);
-      if (!detached.item) {
-        return currentItems;
-      }
+    const detached = detachDocumentItem(documentsSidebarItems, itemId);
+    if (!detached.item) {
+      return;
+    }
 
-      if (targetFolderId === null) {
-        return appendDocumentItem(detached.items, null, detached.item);
-      }
+    const normalizedMovedItem = (() => {
+      const nextLabel = ensureUniqueDocumentLabel(
+        detached.items,
+        targetFolderId,
+        detached.item.label,
+        detached.item.id
+      );
 
-      const destinationAfterDetach = findDocumentItem(detached.items, targetFolderId);
-      if (!destinationAfterDetach || !isDocumentFolder(destinationAfterDetach)) {
-        return currentItems;
-      }
+      return nextLabel === detached.item.label
+        ? detached.item
+        : {
+            ...detached.item,
+            label: nextLabel
+          };
+    })();
 
-      return appendDocumentItem(detached.items, targetFolderId, detached.item);
-    });
+    const nextTree =
+      targetFolderId === null
+        ? appendDocumentItem(detached.items, null, normalizedMovedItem)
+        : (() => {
+            const destinationAfterDetach = findDocumentItem(detached.items, targetFolderId);
+            if (!destinationAfterDetach || !isDocumentFolder(destinationAfterDetach)) {
+              return documentsSidebarItems;
+            }
+
+            return appendDocumentItem(detached.items, targetFolderId, normalizedMovedItem);
+          })();
+
+    setDocumentsSidebarItems(nextTree);
+    rewriteDocumentLinksForTargets(nextTree, collectDocumentNoteIds(sourceItem));
 
     setActiveSection("documents");
     setSelectedSidebarItems((current) => ({
@@ -1476,26 +1788,31 @@ function App() {
 
     const parentFolderId = findDocumentParentFolderId(documentsSidebarItems, itemId);
     const duplicateItem = cloneDocumentItem(sourceItem);
-    duplicateItem.label = `${sourceItem.label} copy`;
+    duplicateItem.label = ensureUniqueDocumentLabel(
+      documentsSidebarItems,
+      parentFolderId,
+      `${sourceItem.label} copy`
+    );
 
     setDocumentsSidebarItems((currentItems) => appendDocumentItem(currentItems, parentFolderId, duplicateItem));
 
     const clonedNotePairs = collectClonedNoteIdPairs(sourceItem, duplicateItem);
-    if (typeof window !== "undefined") {
-      for (const [sourceNoteId, clonedNoteId] of clonedNotePairs) {
-        const serializedMarkdown = window.localStorage.getItem(
-          getDocumentMarkdownStorageKey(sourceNoteId)
-        );
-
-        if (serializedMarkdown === null) {
-          window.localStorage.removeItem(getDocumentMarkdownStorageKey(clonedNoteId));
-        } else {
-          window.localStorage.setItem(getDocumentMarkdownStorageKey(clonedNoteId), serializedMarkdown);
-        }
-      }
-    }
+    const clonedMarkdownUpdates: Record<string, string> = {};
     for (const [sourceNoteId, clonedNoteId] of clonedNotePairs) {
       void copyDocumentNoteFile(sourceNoteId, clonedNoteId, documentsBasePath);
+
+      const sourceMarkdown =
+        documentMarkdownReadyById[sourceNoteId]
+          ? documentMarkdownRef.current[sourceNoteId]
+          : readDocumentMarkdownFromLocalStorage(sourceNoteId);
+
+      if (typeof sourceMarkdown === "string") {
+        clonedMarkdownUpdates[clonedNoteId] = sourceMarkdown;
+      }
+    }
+
+    if (Object.keys(clonedMarkdownUpdates).length > 0) {
+      applyDocumentMarkdownUpdates(clonedMarkdownUpdates, true);
     }
     setSelectedSidebarItems((current) => ({
       ...current,
@@ -1533,27 +1850,50 @@ function App() {
   };
 
   const handleInlineRenameDocumentItem = (itemId: string, nextLabel: string) => {
-    const trimmedLabel = nextLabel.trim();
-    if (!trimmedLabel) {
+    const sourceItem = findDocumentItem(documentsSidebarItems, itemId);
+    if (!sourceItem) {
       return;
     }
 
-    setDocumentsSidebarItems((currentItems) => updateDocumentLabel(currentItems, itemId, trimmedLabel));
+    const parentFolderId = findDocumentParentFolderId(documentsSidebarItems, itemId);
+    const resolvedLabel = ensureUniqueDocumentLabel(
+      documentsSidebarItems,
+      parentFolderId,
+      nextLabel,
+      itemId
+    );
+
+    if (!resolvedLabel || resolvedLabel === sourceItem.label) {
+      return;
+    }
+
+    const nextTree = updateDocumentLabel(documentsSidebarItems, itemId, resolvedLabel);
+    setDocumentsSidebarItems(nextTree);
+    rewriteDocumentLinksForTargets(nextTree, collectDocumentNoteIds(sourceItem));
   };
   const handleConfirmRenameDocumentItem = () => {
     if (!pendingRename) {
       return;
     }
 
-    const nextLabel = pendingRename.value.trim();
-    if (!nextLabel) {
+    const sourceItem = findDocumentItem(documentsSidebarItems, pendingRename.itemId);
+    if (!sourceItem) {
+      setPendingRename(null);
       return;
     }
 
-    if (nextLabel !== pendingRename.label) {
-      setDocumentsSidebarItems((currentItems) =>
-        updateDocumentLabel(currentItems, pendingRename.itemId, nextLabel)
-      );
+    const parentFolderId = findDocumentParentFolderId(documentsSidebarItems, pendingRename.itemId);
+    const nextLabel = ensureUniqueDocumentLabel(
+      documentsSidebarItems,
+      parentFolderId,
+      pendingRename.value,
+      pendingRename.itemId
+    );
+
+    if (nextLabel && nextLabel !== pendingRename.label) {
+      const nextTree = updateDocumentLabel(documentsSidebarItems, pendingRename.itemId, nextLabel);
+      setDocumentsSidebarItems(nextTree);
+      rewriteDocumentLinksForTargets(nextTree, collectDocumentNoteIds(sourceItem));
     }
 
     setPendingRename(null);
@@ -1580,7 +1920,13 @@ function App() {
         window.localStorage.removeItem(getDocumentMarkdownStorageKey(removedNoteId));
       }
     }
+    removeDocumentMarkdownState(removedNoteIds);
     for (const removedNoteId of removedNoteIds) {
+      const pendingTimeoutId = documentWriteTimeoutsRef.current[removedNoteId];
+      if (typeof pendingTimeoutId === "number") {
+        window.clearTimeout(pendingTimeoutId);
+        delete documentWriteTimeoutsRef.current[removedNoteId];
+      }
       void deleteDocumentNoteFile(removedNoteId, documentsBasePath);
     }
     setSelectedSidebarItems((current) =>
@@ -1747,6 +2093,12 @@ function App() {
 
     return undefined;
   })();
+  const activeDocumentMarkdown = activeDocumentNoteId
+    ? documentMarkdownById[activeDocumentNoteId] ?? ""
+    : "";
+  const activeDocumentMarkdownReady = activeDocumentNoteId
+    ? (documentMarkdownReadyById[activeDocumentNoteId] ?? false)
+    : false;
   const openCodexDock = useCallback(
     (focusComposer = false) => {
       setRightDockOpen(true);
@@ -1767,7 +2119,7 @@ function App() {
         }
 
         openCodexDock(true);
-        await flushDocumentNoteDraftToFile(item.id, documentsBasePath);
+        flushPendingDocumentWrite(item.id);
         const resolvedPath = await resolveDocumentNoteFilePath(item.id, documentsBasePath);
         if (!resolvedPath) {
           return;
@@ -1791,7 +2143,14 @@ function App() {
         });
       })();
     },
-    [codexController, documentsBasePath, documentsSidebarItems, openCodexDock, workspace.rootPath]
+    [
+      codexController,
+      documentsBasePath,
+      documentsSidebarItems,
+      flushPendingDocumentWrite,
+      openCodexDock,
+      workspace.rootPath
+    ]
   );
 
   const handleAddMeetingArtifactToCodex = useCallback(
@@ -2366,7 +2725,21 @@ function App() {
     }
 
     if (sectionId === "documents") {
-      return <DocumentsScreen key={activeDocumentNoteId ?? "documents-no-note"} theme={theme} noteId={activeDocumentNoteId} documentsBasePath={documentsBasePath} editorFont={documentsEditorFont} />;
+      return (
+        <DocumentsScreen
+          key={activeDocumentNoteId ?? "documents-no-note"}
+          theme={theme}
+          noteId={activeDocumentNoteId}
+          markdown={activeDocumentMarkdown}
+          markdownReady={activeDocumentMarkdownReady}
+          markdownRevision={activeDocumentNoteId ? (documentExternalRevisionById[activeDocumentNoteId] ?? 0) : 0}
+          documentsBasePath={documentsBasePath}
+          editorFont={documentsEditorFont}
+          documentsIndex={documentsIndex}
+          onMarkdownChange={handleDocumentMarkdownChange}
+          onOpenDocumentLink={handleOpenDocumentLink}
+        />
+      );
     }
     if (sectionId === "runs") {
       return <RunsScreen runs={sortedRuns} />;

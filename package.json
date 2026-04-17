@@ -12,7 +12,8 @@
     "prepreview": "npm run prepare:spellcheck-dictionaries",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:codex-terminal": "node scripts/run-codex-terminal-tests.mjs"
+    "test:codex-terminal": "node scripts/run-codex-terminal-tests.mjs",
+    "test:documents-links": "node --experimental-strip-types scripts/run-documents-link-tests.ts"
   },
   "dependencies": {
     "@carrot-kpi/switzer-font": "^0.1.0",

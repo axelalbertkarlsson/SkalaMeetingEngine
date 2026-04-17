@@ -8,9 +8,17 @@ import { NodeSelection, TextSelection } from "@milkdown/prose/state";
 import type { EditorView } from "@milkdown/prose/view";
 import { listener, listenerCtx } from "@milkdown/plugin-listener";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
+import {
+  clearWikiLinkDecorations,
+  collectEditorWikiLinks,
+  createWikiLinkPlugin,
+  getWikiLinkAtPos,
+  updateWikiLinkDecorations
+} from "../../lib/documents/wikiLinkPlugin";
 import { createSpellcheckPlugin, clearSpellcheckDecorations, getSpellcheckRangeAtPos, updateSpellcheckDecorations } from "../../lib/spellcheck/spellcheckPlugin";
 import { collectSpellcheckTokens } from "../../lib/spellcheck/spellcheckTokenizer";
 import { SpellcheckWorkerClient } from "../../lib/spellcheck/spellcheckWorkerClient";
+import type { DocumentsIndex } from "../../models/documents";
 import type { PersonalDictionary, SpellcheckRange } from "../../models/spellcheck";
 import { addPersonalDictionaryWord, loadPersonalDictionary } from "../../services/spellcheckDictionaryStore";
 
@@ -18,18 +26,30 @@ interface MilkdownEditorProps {
   value: string;
   onChange: (markdown: string) => void;
   className?: string;
+  documentsIndex: DocumentsIndex;
+  onOpenDocumentLink: (noteId: string) => void;
 }
 
 interface MilkdownEditorInnerProps {
   value: string;
   onChange: (markdown: string) => void;
   className?: string;
+  documentsIndex: DocumentsIndex;
+  onOpenDocumentLink: (noteId: string) => void;
 }
 
 interface SpellcheckContextMenuState {
   x: number;
   y: number;
   range: SpellcheckRange;
+}
+
+interface WikiLinkAutocompleteState {
+  from: number;
+  to: number;
+  query: string;
+  x: number;
+  y: number;
 }
 
 function createEmptyPersonalDictionary(): PersonalDictionary {
@@ -52,6 +72,76 @@ function applySuggestionCase(originalWord: string, suggestion: string) {
   }
 
   return suggestion;
+}
+
+function buildWikiLinkSuggestions(query: string, documentsIndex: DocumentsIndex) {
+  const dividerIndex = query.search(/[|#]/);
+  const filterValue = (dividerIndex >= 0 ? query.slice(0, dividerIndex) : query)
+    .trim()
+    .toLocaleLowerCase();
+  const suffix = dividerIndex >= 0 ? query.slice(dividerIndex) : "";
+
+  return [...documentsIndex.notes]
+    .sort((first, second) => first.preferredLinkPath.localeCompare(second.preferredLinkPath))
+    .filter((note) => {
+      if (!filterValue) {
+        return true;
+      }
+
+      const preferred = note.preferredLinkPath.toLocaleLowerCase();
+      const canonical = note.canonicalPath.toLocaleLowerCase();
+      const label = note.label.toLocaleLowerCase();
+      return (
+        preferred.includes(filterValue)
+        || canonical.includes(filterValue)
+        || label.includes(filterValue)
+      );
+    })
+    .slice(0, 8)
+    .map((note) => ({
+      id: note.id,
+      label: note.label,
+      preferredLinkPath: note.preferredLinkPath,
+      canonicalPath: note.canonicalPath,
+      replacement: `[[${note.preferredLinkPath}${suffix}]]`
+    }));
+}
+
+function getWikiLinkAutocompleteState(view: EditorView): WikiLinkAutocompleteState | null {
+  const { selection } = view.state;
+  if (!selection.empty) {
+    return null;
+  }
+
+  const { $from } = selection;
+  if (!$from.parent.isTextblock) {
+    return null;
+  }
+
+  const blockText = $from.parent.textBetween(0, $from.parent.content.size, "", "");
+  const prefix = blockText.slice(0, $from.parentOffset);
+  const startIndex = prefix.lastIndexOf("[[");
+  if (startIndex < 0) {
+    return null;
+  }
+
+  if (prefix.lastIndexOf("]]") > startIndex) {
+    return null;
+  }
+
+  const query = prefix.slice(startIndex + 2);
+  if (query.includes("\n")) {
+    return null;
+  }
+
+  const coords = view.coordsAtPos(selection.from);
+  return {
+    from: $from.start() + startIndex,
+    to: selection.from,
+    query,
+    x: coords.left,
+    y: coords.bottom
+  };
 }
 
 function posAtChildIndex(doc: ProseMirrorNode, index: number): number {
@@ -197,8 +287,16 @@ function selectBlockByIndex(view: EditorView, blockIndex: number) {
   view.focus();
 }
 
-function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInnerProps) {
+function MilkdownEditorInner({
+  value,
+  onChange,
+  className,
+  documentsIndex,
+  onOpenDocumentLink
+}: MilkdownEditorInnerProps) {
   const onChangeRef = useRef(onChange);
+  const documentsIndexRef = useRef(documentsIndex);
+  const onOpenDocumentLinkRef = useRef(onOpenDocumentLink);
   const initialValueRef = useRef(value);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const crepeRef = useRef<Crepe | null>(null);
@@ -208,10 +306,37 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
   const spellcheckDocVersionRef = useRef(0);
   const personalDictionaryRef = useRef<PersonalDictionary>(createEmptyPersonalDictionary());
   const spellcheckMenuRef = useRef<HTMLDivElement | null>(null);
+  const wikiLinkAutocompleteRef = useRef<HTMLDivElement | null>(null);
   const [spellcheckMenu, setSpellcheckMenu] = useState<SpellcheckContextMenuState | null>(null);
+  const [wikiLinkAutocomplete, setWikiLinkAutocomplete] = useState<WikiLinkAutocompleteState | null>(null);
 
   const closeSpellcheckMenu = () => {
     setSpellcheckMenu(null);
+  };
+
+  const closeWikiLinkAutocomplete = () => {
+    setWikiLinkAutocomplete(null);
+  };
+
+  const syncWikiLinks = (view: EditorView) => {
+    const nextLinks = collectEditorWikiLinks(view.state.doc, documentsIndexRef.current);
+    updateWikiLinkDecorations(view, nextLinks);
+  };
+
+  const syncWikiLinkAutocomplete = (view: EditorView) => {
+    const nextAutocompleteState = getWikiLinkAutocompleteState(view);
+    if (!nextAutocompleteState) {
+      closeWikiLinkAutocomplete();
+      return;
+    }
+
+    const suggestions = buildWikiLinkSuggestions(nextAutocompleteState.query, documentsIndexRef.current);
+    if (suggestions.length === 0) {
+      closeWikiLinkAutocomplete();
+      return;
+    }
+
+    setWikiLinkAutocomplete(nextAutocompleteState);
   };
 
   const scheduleSpellcheck = (doc: ProseMirrorNode) => {
@@ -243,6 +368,22 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
     onChangeRef.current = onChange;
   }, [onChange]);
 
+  useEffect(() => {
+    documentsIndexRef.current = documentsIndex;
+
+    const view = editorViewRef.current;
+    if (!view) {
+      return;
+    }
+
+    syncWikiLinks(view);
+    syncWikiLinkAutocomplete(view);
+  }, [documentsIndex]);
+
+  useEffect(() => {
+    onOpenDocumentLinkRef.current = onOpenDocumentLink;
+  }, [onOpenDocumentLink]);
+
   useEditor((root) => {
     const crepe = new Crepe({
       root,
@@ -259,7 +400,9 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
     crepeRef.current = crepe;
 
     crepe.editor.use(listener).config((ctx) => {
-      ctx.update(prosePluginsCtx, (plugins) => plugins.concat(createSpellcheckPlugin()));
+      ctx.update(prosePluginsCtx, (plugins) =>
+        plugins.concat(createSpellcheckPlugin(), createWikiLinkPlugin())
+      );
 
       const listeners = ctx.get(listenerCtx);
       listeners
@@ -269,10 +412,15 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
           view.dom.spellcheck = false;
           view.dom.setAttribute("spellcheck", "false");
           scheduleSpellcheck(view.state.doc);
+          syncWikiLinks(view);
+          syncWikiLinkAutocomplete(view);
         })
         .updated((updatedCtx, doc) => {
-          editorViewRef.current = updatedCtx.get(editorViewCtx);
+          const view = updatedCtx.get(editorViewCtx);
+          editorViewRef.current = view;
           scheduleSpellcheck(doc);
+          syncWikiLinks(view);
+          syncWikiLinkAutocomplete(view);
         })
         .markdownUpdated((_ctx, markdown) => {
           onChangeRef.current(markdown);
@@ -280,6 +428,7 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
         .destroy(() => {
           editorViewRef.current = null;
           closeSpellcheckMenu();
+          closeWikiLinkAutocomplete();
         });
     });
 
@@ -344,6 +493,7 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
       const view = editorViewRef.current;
       if (view) {
         clearSpellcheckDecorations(view);
+        clearWikiLinkDecorations(view);
       }
 
       spellcheckWorkerRef.current = null;
@@ -692,6 +842,104 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
     };
   }, [spellcheckMenu]);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!event.metaKey && !event.ctrlKey) {
+        return;
+      }
+
+      const view = editorViewRef.current;
+      if (!view) {
+        return;
+      }
+
+      const resolvedPosition = view.posAtCoords({
+        left: event.clientX,
+        top: event.clientY
+      });
+      if (!resolvedPosition) {
+        return;
+      }
+
+      const link = getWikiLinkAtPos(view.state, resolvedPosition.pos);
+      if (!link?.targetNoteId) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      onOpenDocumentLinkRef.current(link.targetNoteId);
+    };
+
+    container.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      container.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!wikiLinkAutocomplete) {
+      return;
+    }
+
+    const suggestions = buildWikiLinkSuggestions(
+      wikiLinkAutocomplete.query,
+      documentsIndexRef.current
+    );
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && wikiLinkAutocompleteRef.current?.contains(target)) {
+        return;
+      }
+
+      closeWikiLinkAutocomplete();
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeWikiLinkAutocomplete();
+        return;
+      }
+
+      if ((event.key === "Enter" || event.key === "Tab") && suggestions.length > 0) {
+        event.preventDefault();
+        insertWikiLinkSuggestion(suggestions[0].replacement);
+      }
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [wikiLinkAutocomplete]);
+
+  const insertWikiLinkSuggestion = (replacement: string) => {
+    const view = editorViewRef.current;
+    if (!view || !wikiLinkAutocomplete) {
+      return;
+    }
+
+    const transaction = view.state.tr.insertText(
+      replacement,
+      wikiLinkAutocomplete.from,
+      wikiLinkAutocomplete.to
+    );
+    view.dispatch(transaction.scrollIntoView());
+    view.focus();
+    closeWikiLinkAutocomplete();
+    syncWikiLinks(view);
+    syncWikiLinkAutocomplete(view);
+  };
+
   const replaceMisspelledWord = (range: SpellcheckRange, suggestion: string) => {
     const view = editorViewRef.current;
     if (!view) {
@@ -727,6 +975,10 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
       console.error("[spellcheck] Failed to add word to dictionary", { range, error });
     }
   };
+
+  const wikiLinkSuggestions = wikiLinkAutocomplete
+    ? buildWikiLinkSuggestions(wikiLinkAutocomplete.query, documentsIndex)
+    : [];
 
   const spellcheckMenuOverlay = spellcheckMenu && typeof document !== "undefined"
     ? createPortal(
@@ -778,6 +1030,42 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
         document.body
       )
     : null;
+  const wikiLinkAutocompleteOverlay =
+    wikiLinkAutocomplete && wikiLinkSuggestions.length > 0 && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={wikiLinkAutocompleteRef}
+            className="documents-context-menu documents-wiki-link-autocomplete"
+            style={{
+              left: `${Math.max(8, Math.min(wikiLinkAutocomplete.x, window.innerWidth - 280))}px`,
+              top: `${Math.max(8, Math.min(wikiLinkAutocomplete.y + 6, window.innerHeight - 320))}px`
+            }}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+          >
+            {wikiLinkSuggestions.map((suggestion) => (
+              <button
+                key={suggestion.id}
+                type="button"
+                className="documents-context-menu-item documents-wiki-link-suggestion"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  insertWikiLinkSuggestion(suggestion.replacement);
+                }}
+              >
+                <span className="documents-wiki-link-suggestion-label">{suggestion.label}</span>
+                <span className="documents-wiki-link-suggestion-meta">
+                  {suggestion.canonicalPath}
+                </span>
+              </button>
+            ))}
+          </div>,
+          document.body
+        )
+      : null;
 
   return (
     <>
@@ -787,15 +1075,28 @@ function MilkdownEditorInner({ value, onChange, className }: MilkdownEditorInner
       >
         <Milkdown />
       </div>
+      {wikiLinkAutocompleteOverlay}
       {spellcheckMenuOverlay}
     </>
   );
 }
 
-export function MilkdownEditor({ value, onChange, className }: MilkdownEditorProps) {
+export function MilkdownEditor({
+  value,
+  onChange,
+  className,
+  documentsIndex,
+  onOpenDocumentLink
+}: MilkdownEditorProps) {
   return (
     <MilkdownProvider>
-      <MilkdownEditorInner value={value} onChange={onChange} className={className} />
+      <MilkdownEditorInner
+        value={value}
+        onChange={onChange}
+        className={className}
+        documentsIndex={documentsIndex}
+        onOpenDocumentLink={onOpenDocumentLink}
+      />
     </MilkdownProvider>
   );
 }
