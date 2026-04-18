@@ -1030,6 +1030,89 @@ table {
   padding: var(--space-3);
 }
 
+.documents-empty-state {
+  height: 100%;
+  padding: var(--space-3);
+}
+
+.documents-link-sections {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.documents-link-section {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--panel-bg-tertiary);
+  padding: var(--space-2);
+}
+
+.documents-link-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.documents-link-section-header h4 {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.documents-link-section-header span {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.documents-link-empty {
+  margin: 0;
+}
+
+.documents-link-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.documents-link-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.documents-link-source {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.documents-link-arrow {
+  color: var(--text-muted);
+}
+
+.documents-link-chip {
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: var(--panel-bg-secondary);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+}
+
+button.documents-link-chip {
+  cursor: pointer;
+}
+
+button.documents-link-chip:hover {
+  background: var(--hover-bg);
+}
+
+.documents-link-chip.dangling {
+  color: var(--warning-color);
+  border-style: dashed;
+}
+
 .documents-preview-content {
   color: var(--text-primary);
   font-size: var(--font-size-md);
@@ -1082,6 +1165,191 @@ table {
   padding-left: var(--space-2);
   color: var(--text-muted);
 }
+
+.documents-inline-link {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent-color);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+}
+
+.documents-inline-link.dangling {
+  color: var(--warning-color);
+  text-decoration-style: dashed;
+}
+
+.documents-graph-root,
+.documents-graph-empty {
+  height: 100%;
+  min-height: 0;
+}
+
+.documents-graph-root {
+  position: relative;
+}
+
+.documents-graph-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3);
+}
+
+.documents-graph-status {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 1;
+  display: grid;
+  gap: 4px;
+  max-width: min(440px, calc(100% - (var(--space-3) * 2)));
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-bg-secondary) 92%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 10%, transparent);
+  font-size: var(--font-size-sm);
+}
+
+.documents-graph-status code {
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 0.95em;
+}
+
+.documents-graph-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  background:
+    radial-gradient(circle at top, rgba(53, 163, 133, 0.06), transparent 38%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+}
+
+.documents-graph-canvas:active {
+  cursor: grabbing;
+}
+
+.documents-graph-background {
+  fill: transparent;
+}
+
+.documents-graph-edge {
+  fill: none;
+  stroke: var(--accent-color);
+  stroke-opacity: 0.78;
+  stroke-linecap: round;
+  pointer-events: none;
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease,
+    stroke-opacity 140ms ease;
+}
+
+.documents-graph-edge.dangling {
+  stroke: var(--warning-color);
+  stroke-opacity: 0.9;
+  stroke-dasharray: 10 8;
+}
+
+.documents-graph-node {
+  cursor: default;
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease;
+}
+
+.documents-graph-node.clickable {
+  cursor: pointer;
+}
+
+.documents-graph-node circle,
+.documents-graph-node text {
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease,
+    fill 140ms ease,
+    stroke-width 140ms ease;
+}
+
+.documents-graph-node circle {
+  fill: var(--panel-bg-secondary);
+  stroke: var(--accent-color);
+  stroke-width: 2;
+}
+
+.documents-graph-node.dangling circle {
+  stroke: var(--warning-color);
+  stroke-dasharray: 6 5;
+}
+
+.documents-graph-node.active circle {
+  fill: color-mix(in srgb, var(--accent-color) 14%, var(--panel-bg-secondary));
+  stroke-width: 3;
+}
+
+.documents-graph-node.focused circle {
+  fill: color-mix(in srgb, var(--accent-color) 18%, var(--panel-bg-secondary));
+  stroke-width: 4;
+}
+
+.documents-graph-node.related circle {
+  fill: color-mix(in srgb, var(--accent-color) 8%, var(--panel-bg-secondary));
+  stroke-width: 2.5;
+}
+
+.documents-graph-node.dragging {
+  filter: drop-shadow(0 10px 20px color-mix(in srgb, var(--accent-color) 24%, transparent));
+}
+
+.documents-graph-node.dragging,
+.documents-graph-node.dragging.clickable {
+  cursor: grabbing;
+}
+
+.documents-graph-node.dragging circle {
+  fill: color-mix(in srgb, var(--accent-color) 22%, var(--panel-bg-secondary));
+  stroke-width: 4.5;
+}
+
+.documents-graph-node text {
+  fill: var(--text-primary);
+  font-size: 16px;
+  font-weight: 500;
+  paint-order: stroke;
+  stroke: var(--panel-bg-secondary);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+}
+
+.documents-graph-root.has-focus .documents-graph-edge.related {
+  stroke-opacity: 1;
+}
+
+.documents-graph-root.has-focus .documents-graph-edge.dimmed,
+.documents-graph-root.has-focus .documents-graph-node.dimmed {
+  opacity: 0.14;
+  filter: blur(2px);
+}
+
+.documents-graph-root.has-focus .documents-graph-node.focused,
+.documents-graph-root.has-focus .documents-graph-node.related {
+  opacity: 1;
+}
+
+.documents-graph-root.has-focus .documents-graph-node.dimmed text {
+  opacity: 0.5;
+}
+
+.documents-graph-root.dragging-node .documents-graph-canvas {
+  cursor: default;
+}
+
 .pane-header {
   display: flex;
   justify-content: space-between;
@@ -1115,8 +1383,41 @@ table {
 
 .documents-toolbar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: var(--space-2);
   padding: 0 var(--space-3);
+}
+
+.documents-pane-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg-secondary);
+}
+
+.documents-pane-mode-button {
+  min-width: 68px;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.documents-pane-mode-button.active {
+  background: color-mix(in srgb, var(--accent-color) 16%, var(--panel-bg-secondary));
+  color: var(--text-primary);
+}
+
+.documents-pane-mode-button:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
 }
 
 .documents-pane-toggle {
@@ -1146,6 +1447,38 @@ table {
   font-size: 15px;
   font-weight: 600;
   line-height: 1;
+  color: var(--text-muted);
+}
+
+.documents-editor-root .milkdown .documents-wiki-link {
+  color: var(--accent-color);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.documents-editor-root .milkdown .documents-wiki-link.dangling {
+  color: var(--warning-color);
+  text-decoration-style: dashed;
+}
+
+.documents-wiki-link-autocomplete {
+  width: min(280px, calc(100vw - 16px));
+}
+
+.documents-wiki-link-suggestion {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.documents-wiki-link-suggestion-label {
+  color: var(--text-primary);
+}
+
+.documents-wiki-link-suggestion-meta {
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
