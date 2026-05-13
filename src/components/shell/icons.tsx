@@ -152,6 +152,17 @@ export function CollapseAllIcon() {
   );
 }
 
+export function ResetIcon() {
+  return (
+    <BaseIcon>
+      <path d="M20 7v5h-5" />
+      <path d="M4 17v-5h5" />
+      <path d="M18.5 9A7 7 0 0 0 6.2 6.2L4 8.4" />
+      <path d="M5.5 15A7 7 0 0 0 17.8 17.8L20 15.6" />
+    </BaseIcon>
+  );
+}
+
 export function ChevronRightIcon() {
   return (
     <BaseIcon>
