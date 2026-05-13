@@ -56,6 +56,7 @@ const nodePointerMoveThreshold = 6;
 const simulationStopAlpha = 0.012;
 const simulationAlphaDecay = 0.92;
 const dragSimulationAlpha = 0.72;
+const dragImmediateSimulationIterations = 4;
 const forceControls: Array<{ key: DocumentGraphForceSettingKey; label: string }> = [
   { key: "centerForce", label: "Center force" },
   { key: "repelForce", label: "Repel force" },
@@ -659,17 +660,21 @@ export function DocumentsGraphView({
       interaction.currentY = nextY;
 
       setSimulationNodes((current) => {
-        const nextNodes = current.map((node) =>
-          node.id === interaction.nodeId
-            ? {
-                ...node,
-                x: nextX,
-                y: nextY,
-                vx: 0,
-                vy: 0
-              }
-            : node
-        );
+        let nextNodes = current.length > 0 ? current : simulationNodesRef.current;
+        const fixedNode = {
+          nodeId: interaction.nodeId,
+          x: nextX,
+          y: nextY
+        };
+
+        for (let iteration = 0; iteration < dragImmediateSimulationIterations; iteration += 1) {
+          nextNodes = stepDocumentGraphSimulation(nextNodes, graphEdgesRef.current, forceSettingsRef.current, {
+            alpha: dragSimulationAlpha,
+            fixedNode,
+            nodeRadiusById: nodeRadiusByIdRef.current
+          });
+        }
+
         simulationNodesRef.current = nextNodes;
         return nextNodes;
       });
