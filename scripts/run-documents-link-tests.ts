@@ -7,6 +7,13 @@ import {
   parseWikiLinks,
   rewriteResolvedWikiLinks
 } from "../src/lib/documentsLinks.ts";
+import {
+  defaultDocumentGraphForceSettings,
+  documentGraphBaseForceConstants,
+  documentGraphForceSettingsToParameters,
+  stepDocumentGraphSimulation,
+  type DocumentGraphSimulationNode
+} from "../src/lib/documentGraphSimulation.ts";
 import type { DocumentTreeItem } from "../src/models/documents.ts";
 
 function createTree(items: DocumentTreeItem[]): DocumentTreeItem[] {
@@ -244,6 +251,112 @@ runTest("graph pinned position cleanup removes stale node ids", () => {
   assert.deepEqual(cleaned, {
     "note-a": { x: 10, y: 20 }
   });
+});
+
+runTest("graph force defaults map to the legacy layout constants", () => {
+  const parameters = documentGraphForceSettingsToParameters(defaultDocumentGraphForceSettings);
+
+  assert.equal(parameters.centerStrength, documentGraphBaseForceConstants.centerStrength);
+  assert.equal(parameters.repulsionStrength, documentGraphBaseForceConstants.repulsionStrength);
+  assert.equal(parameters.linkStrength, documentGraphBaseForceConstants.linkStrength);
+  assert.equal(parameters.linkDistance, documentGraphBaseForceConstants.linkDistance);
+});
+
+runTest("graph simulation keeps dragged node fixed at the supplied point", () => {
+  const nodes: DocumentGraphSimulationNode[] = [
+    {
+      id: "note-a",
+      label: "Note A",
+      canonicalPath: "Note A",
+      noteId: "note-a",
+      kind: "note",
+      degree: 1,
+      x: 0,
+      y: 0,
+      vx: 10,
+      vy: -10
+    },
+    {
+      id: "note-b",
+      label: "Note B",
+      canonicalPath: "Note B",
+      noteId: "note-b",
+      kind: "note",
+      degree: 1,
+      x: 200,
+      y: 0,
+      vx: 0,
+      vy: 0
+    }
+  ];
+
+  const nextNodes = stepDocumentGraphSimulation(nodes, [], defaultDocumentGraphForceSettings, {
+    fixedNode: { nodeId: "note-a", x: 42, y: -36 },
+    alpha: 1
+  });
+  const draggedNode = nextNodes.find((node) => node.id === "note-a");
+
+  assert.equal(draggedNode?.x, 42);
+  assert.equal(draggedNode?.y, -36);
+  assert.equal(draggedNode?.vx, 0);
+  assert.equal(draggedNode?.vy, 0);
+});
+
+runTest("graph simulation pushes non-dragged nodes away from a dragged collision", () => {
+  const nodes: DocumentGraphSimulationNode[] = [
+    {
+      id: "note-a",
+      label: "Note A",
+      canonicalPath: "Note A",
+      noteId: "note-a",
+      kind: "note",
+      degree: 0,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0
+    },
+    {
+      id: "note-b",
+      label: "Note B",
+      canonicalPath: "Note B",
+      noteId: "note-b",
+      kind: "note",
+      degree: 0,
+      x: 1,
+      y: 0,
+      vx: 0,
+      vy: 0
+    }
+  ];
+
+  const nextNodes = stepDocumentGraphSimulation(nodes, [], defaultDocumentGraphForceSettings, {
+    fixedNode: { nodeId: "note-a", x: 0, y: 0 },
+    nodeRadiusById: new Map([
+      ["note-a", 20],
+      ["note-b", 20]
+    ]),
+    alpha: 1
+  });
+  const pushedNode = nextNodes.find((node) => node.id === "note-b");
+
+  assert.ok(pushedNode);
+  assert.ok(Math.hypot(pushedNode!.x, pushedNode!.y) >= 50);
+});
+
+runTest("graph force link distance slider changes the spring target distance", () => {
+  const compactParameters = documentGraphForceSettingsToParameters({
+    ...defaultDocumentGraphForceSettings,
+    linkDistance: 0
+  });
+  const expandedParameters = documentGraphForceSettingsToParameters({
+    ...defaultDocumentGraphForceSettings,
+    linkDistance: 100
+  });
+
+  assert.equal(compactParameters.linkDistance, 80);
+  assert.equal(expandedParameters.linkDistance, 220);
+  assert.ok(expandedParameters.linkDistance > compactParameters.linkDistance);
 });
 
 console.log("All document link tests passed.");
